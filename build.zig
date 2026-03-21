@@ -88,6 +88,39 @@ pub fn build(b: *std.Build) void {
 
     exe.linkLibC();
     exe.linkSystemLibrary("blend2d");
+    exe.linkSystemLibrary("tree-sitter");
+
+    const languages = [_][]const u8{ "zig", "rust", "javascript", "typescript", "python", "c", "cpp", "go", "html", "css", "java", "ruby", "php", "json", "markdown", "sql" };
+
+    for (languages) |language| {
+        const repo_path = b.fmt("deps/tree-sitter-{s}", .{language});
+
+        // TODO check for other directories as well...
+        const src_dir = b.pathJoin(&.{ repo_path, "src" });
+        const parser_c = b.pathJoin(&.{ src_dir, "parser.c" });
+
+        if (std.fs.cwd().access(parser_c, .{})) |_| {
+            exe.root_module.addCSourceFile(.{
+                .file = b.path(parser_c),
+                .flags = &.{ "-I", src_dir, "-std=c11", "-O3" },
+            });
+
+            const scanner_c = b.pathJoin(&.{ src_dir, "scanner.c" });
+            const scanner_cc = b.pathJoin(&.{ src_dir, "scanner.cc" });
+            
+            if (hasScanner(scanner_c)) {
+                exe.root_module.addCSourceFile(.{ .file = b.path(scanner_c), .flags = &.{ "-I", src_dir, "-std=c11", "-O3" } });
+            }
+
+            if (hasScanner(scanner_cc)) {
+                exe.root_module.addCSourceFile(.{ .file = b.path(scanner_cc), .flags = &.{ "-I", src_dir, "-O3" } });
+                exe.root_module.link_libcpp = true;
+            }
+        } else |err| {
+            // TODO typescript php markdown
+            std.debug.print("Skipping {s}: parser.c not found in src/ ({s})\n", .{ language, @errorName(err) });
+        }
+    }
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -159,4 +192,9 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+}
+
+fn hasScanner(scanner: []u8) bool {
+    _ = std.fs.cwd().access(scanner, .{}) catch return false;
+    return true;
 }
