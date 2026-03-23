@@ -1,5 +1,6 @@
 const std = @import("std");
 const tree_sitter = @import("tree-sitter.zig");
+const root = @import("root.zig");
 const c = @cImport({
     @cInclude("blend2d/blend2d.h");
 });
@@ -21,7 +22,7 @@ pub fn generateImage(tokens: []const tree_sitter.Token) !void {
         std.log.err("Failed to draw tokens: {}", .{err});
         return err;
     };
-    
+
     var codec: c.BLImageCodecCore = undefined;
     _ = c.bl_image_codec_init(&codec);
     _ = c.bl_image_codec_find_by_name(&codec, "PNG", @intCast("PNG".len), null);
@@ -47,13 +48,21 @@ fn drawCodeWindow(ctx: *c.BLContextCore, color: u32) void {
 fn drawCodeWindowControls(ctx: *c.BLContextCore) void {
     const colors = [_]u32{ 0xFFFF5F56, 0xFFFFBD2E, 0xFF27C93F };
     for (colors, 0..) |color, index| {
-        const circle = c.BLCircle{ .cx = @as(f64, @floatFromInt(75 + (index * 20))), .cy = @as(f64, @floatFromInt(75)), .r = @as(f64, @floatFromInt(6)) };
+        const center_x = @as(f64, @floatFromInt(75 + (index * 20)));
+        const center_y = @as(f64, @floatFromInt(75));
+        const radius = @as(f64, @floatFromInt(6));
+        const circle = c.BLCircle{ .cx = center_x, .cy = center_y, .r = radius };
         _ = c.bl_context_set_fill_style_rgba32(ctx, color);
         _ = c.bl_context_fill_geometry(ctx, c.BL_GEOMETRY_TYPE_CIRCLE, &circle);
     }
 }
 
 fn drawTokens(ctx: *c.BLContextCore, tokens: []const tree_sitter.Token) !void {
+    const max_width: f64 = 700.0;
+    var allocator = std.heap.page_allocator;
+    var starting_whitespace = try std.fmt.allocPrint(allocator, "", .{});
+    defer allocator.free(starting_whitespace);
+
     var face: c.BLFontFaceCore = undefined;
     _ = c.bl_font_face_init(&face);
     defer _ = c.bl_font_face_reset(&face);
@@ -71,8 +80,9 @@ fn drawTokens(ctx: *c.BLContextCore, tokens: []const tree_sitter.Token) !void {
     }
 
     var font: c.BLFontCore = undefined;
+    const font_size = 16.0; // TODO from file
     _ = c.bl_font_init(&font);
-    _ = c.bl_font_create_from_face(&font, &face, 20.0); // TODO font size
+    _ = c.bl_font_create_from_face(&font, &face, font_size); // TODO font size
     defer _ = c.bl_font_reset(&font);
 
     var metrics: c.BLFontMetrics = undefined;
@@ -80,52 +90,78 @@ fn drawTokens(ctx: *c.BLContextCore, tokens: []const tree_sitter.Token) !void {
     const ascent = metrics.unnamed_0.unnamed_0.ascent;
     const descent = metrics.unnamed_0.unnamed_0.descent;
     const line_height = ascent + descent + metrics.line_gap;
+    const char_width = ascent * 0.6;
+    const indentation_padding: f64 = char_width * 3;
 
-    const margin_x: f64 = 80.0;
-    const margin_y: f64 = 60.0;
+    const margin_x: f64 = 100.0;
+    const margin_y: f64 = 100.0;
     var pen_x = margin_x;
     var pen_y = margin_y + ascent;
     var line_num: usize = 1;
 
     // First line number
-    drawLineNumber(ctx, &font, 10.0, pen_y, line_num);
+    drawLineNumber(ctx, &font, 45.0, pen_y, line_num);
 
     var gb: c.BLGlyphBufferCore = undefined;
     _ = c.bl_glyph_buffer_init(&gb);
     defer _ = c.bl_glyph_buffer_reset(&gb);
 
     for (tokens) |token| {
+        std.log.debug("Token text:|{s}|", .{token.text});
         var it = std.mem.splitScalar(u8, token.text, '\n');
         var first_part = true;
 
         while (it.next()) |chunk| {
+            std.log.debug("chunk=|{s}|", .{chunk});
             if (!first_part) {
+                std.log.debug("!firstPart", .{});
+                // starting_whitespace = chunk;
+                starting_whitespace = try std.fmt.allocPrint(allocator, "{s}", .{chunk});
+                std.log.debug("STARTING WHITESPACE:|{s}|", .{starting_whitespace});
                 line_num += 1;
                 pen_x = margin_x;
                 pen_y += line_height;
-                drawLineNumber(ctx, &font, 10.0, pen_y, line_num);
+                drawLineNumber(ctx, &font, 45.0, pen_y, line_num);
             }
             first_part = false;
 
             if (chunk.len > 0) {
-                std.log.debug("chunk={s}", .{chunk});
-                _ = c.bl_glyph_buffer_set_text(&gb, chunk.ptr, chunk.len, c.BL_TEXT_ENCODING_UTF8);
-                _ = c.bl_font_shape(&font, &gb);
+                var words = root.SplitInclusiveIterator{ .buffer = chunk, .delimiter = " ", .index = 0 };
+                while (words.next()) |w| {
+                    std.log.debug("CUSTOM WORDS:|{s}|", .{w});
+                    var word_metrics: c.BLTextMetrics = undefined;
+                    prepareRenderOfChunkAndIndentation(&gb, &font, &word_metrics, w);
 
-                _ = c.bl_context_set_fill_style_rgba32(ctx, token.color);
+                    if (pen_x + word_metrics.advance.x + char_width > max_width) {
+                        pen_y += line_height;
+                        pen_x = margin_x;
+                        std.log.debug("USING WHITESPACE:|{s}|", .{starting_whitespace});
 
-                const pt = c.BLPoint{ .x = pen_x, .y = pen_y };
-                _ = c.bl_context_fill_glyph_run_d(ctx, &pt, &font, c.bl_glyph_buffer_get_glyph_run(&gb));
+                        prepareRenderOfChunkAndIndentation(&gb, &font, &word_metrics, starting_whitespace);
+                        const pt = c.BLPoint{ .x = pen_x, .y = pen_y };
+                        // _ = c.bl_context_fill_glyph_run_d(ctx, &pt, &font, c.bl_glyph_buffer_get_glyph_run(&gb));
+                        _ = c.bl_context_fill_utf8_text_d(ctx, &pt, &font, starting_whitespace.ptr, starting_whitespace.len);
+                        pen_x += word_metrics.advance.x + indentation_padding;
+                    }
 
-                var text_metrics: c.BLTextMetrics = undefined;
-                _ = c.bl_font_get_text_metrics(&font, &gb, &text_metrics);
-                pen_x += text_metrics.advance.x;
+                    prepareRenderOfChunkAndIndentation(&gb, &font, &word_metrics, w);
+
+                    const pt = c.BLPoint{ .x = pen_x, .y = pen_y };
+                    // _ = c.bl_context_fill_glyph_run_d(ctx, &pt, &font, c.bl_glyph_buffer_get_glyph_run(&gb));
+                    _ = c.bl_context_fill_utf8_text_d(ctx, &pt, &font, w.ptr, w.len);
+
+                    pen_x += word_metrics.advance.x;
+                }
             }
         }
     }
 }
 
-
+fn prepareRenderOfChunkAndIndentation(gb: *c.BLGlyphBufferCore, font: *c.BLFontCore, word_metrics: *c.BLTextMetrics, word: []const u8) void {
+    _ = c.bl_glyph_buffer_set_text(gb, word.ptr, word.len, c.BL_TEXT_ENCODING_UTF8);
+    _ = c.bl_font_shape(font, gb);
+    _ = c.bl_font_get_text_metrics(font, gb, word_metrics);
+}
 
 fn drawLineNumber(ctx: *c.BLContextCore, font: *c.BLFontCore, x: f64, y: f64, num: usize) void {
     var buf: [8]u8 = undefined;
