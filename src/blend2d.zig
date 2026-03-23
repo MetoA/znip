@@ -18,10 +18,14 @@ pub fn generateImage(tokens: []const tree_sitter.Token) !void {
 
     fillBackground(&ctx, 0xFF37A3FF);
     drawCodeWindow(&ctx, 0xFF44475A);
-    drawTokens(&ctx, tokens) catch |err| {
-        std.log.err("Failed to draw tokens: {}", .{err});
+    const prep = prepareDrawableChunks(tokens) catch |err| {
+        std.log.err("Failed to prepare chunks: {}", .{err});
         return err;
     };
+    for (prep.items) |chunk| {
+        std.log.debug("Chunk: x={d}, y={d}, text={s}", .{ chunk.x, chunk.y, chunk.text });
+    }
+    try drawDrawableChunks(&ctx,prep.items);
 
     var codec: c.BLImageCodecCore = undefined;
     _ = c.bl_image_codec_init(&codec);
@@ -57,11 +61,11 @@ fn drawCodeWindowControls(ctx: *c.BLContextCore) void {
     }
 }
 
-fn drawTokens(ctx: *c.BLContextCore, tokens: []const tree_sitter.Token) !void {
-    const max_width: f64 = 700.0;
+fn prepareDrawableChunks(tokens: []const tree_sitter.Token) !std.ArrayList(DrawableChunk) {
     var allocator = std.heap.page_allocator;
-    var starting_whitespace = try std.fmt.allocPrint(allocator, "", .{});
+    var starting_whitespace: []const u8 = "";
     defer allocator.free(starting_whitespace);
+    var drawableChunks = std.ArrayList(DrawableChunk).empty;
 
     var face: c.BLFontFaceCore = undefined;
     _ = c.bl_font_face_init(&face);
@@ -79,81 +83,119 @@ fn drawTokens(ctx: *c.BLContextCore, tokens: []const tree_sitter.Token) !void {
         return error.FontFaceCreationFailed;
     }
 
-    var font: c.BLFontCore = undefined;
-    const font_size = 16.0; // TODO from file
-    _ = c.bl_font_init(&font);
-    _ = c.bl_font_create_from_face(&font, &face, font_size); // TODO font size
-    defer _ = c.bl_font_reset(&font);
-
-    var metrics: c.BLFontMetrics = undefined;
-    _ = c.bl_font_get_metrics(&font, &metrics);
-    const ascent = metrics.unnamed_0.unnamed_0.ascent;
-    const descent = metrics.unnamed_0.unnamed_0.descent;
-    const line_height = ascent + descent + metrics.line_gap;
-    const char_width = ascent * 0.6;
-    const indentation_padding: f64 = char_width * 3;
-
-    const margin_x: f64 = 100.0;
-    const margin_y: f64 = 100.0;
-    var pen_x = margin_x;
-    var pen_y = margin_y + ascent;
-    var line_num: usize = 1;
-
-    // First line number
-    drawLineNumber(ctx, &font, 45.0, pen_y, line_num);
-
+    // TODO try without glyphs? just text?
     var gb: c.BLGlyphBufferCore = undefined;
     _ = c.bl_glyph_buffer_init(&gb);
     defer _ = c.bl_glyph_buffer_reset(&gb);
 
+    var font: c.BLFontCore = undefined;
+    const font_size = 16.0; // TODO from file
+    _ = c.bl_font_init(&font);
+    _ = c.bl_font_create_from_face(&font, &face, font_size);
+    defer _ = c.bl_font_reset(&font);
+
+    var metrics: c.BLFontMetrics = undefined;
+    _ = c.bl_font_get_metrics(&font, &metrics);
+    
+    const ascent = metrics.unnamed_0.unnamed_0.ascent;
+    const descent = metrics.unnamed_0.unnamed_0.descent;
+    const line_height = ascent + descent + metrics.line_gap;
+    const char_width = ascent * 0.6;
+    const indentation_padding: f64 = char_width * 4;
+    const margin_x: f64 = 100.0;
+    const margin_y: f64 = 100.0;
+    const max_width: f64 = 700.0; // TODO based on longest line width?
+    
+    var pen_x = margin_x;
+    var pen_y = margin_y + ascent;
+    var line_num: usize = 1;
+    
+    try drawableChunks.append(allocator, lineNumberDrawableChunk(allocator, 45.0, pen_y, line_num));
+
     for (tokens) |token| {
-        std.log.debug("Token text:|{s}|", .{token.text});
         var it = std.mem.splitScalar(u8, token.text, '\n');
         var first_part = true;
 
         while (it.next()) |chunk| {
-            std.log.debug("chunk=|{s}|", .{chunk});
+            // Mostly helps with new lines
             if (!first_part) {
-                std.log.debug("!firstPart", .{});
-                // starting_whitespace = chunk;
-                starting_whitespace = try std.fmt.allocPrint(allocator, "{s}", .{chunk});
-                std.log.debug("STARTING WHITESPACE:|{s}|", .{starting_whitespace});
+                starting_whitespace = chunk;
                 line_num += 1;
                 pen_x = margin_x;
                 pen_y += line_height;
-                drawLineNumber(ctx, &font, 45.0, pen_y, line_num);
+                try drawableChunks.append(allocator, lineNumberDrawableChunk(allocator, 45.0, pen_y, line_num));
             }
             first_part = false;
 
             if (chunk.len > 0) {
                 var words = root.SplitInclusiveIterator{ .buffer = chunk, .delimiter = " ", .index = 0 };
-                while (words.next()) |w| {
-                    std.log.debug("CUSTOM WORDS:|{s}|", .{w});
+                while (words.next()) |word| {
                     var word_metrics: c.BLTextMetrics = undefined;
-                    prepareRenderOfChunkAndIndentation(&gb, &font, &word_metrics, w);
+                    prepareRenderOfChunkAndIndentation(&gb, &font, &word_metrics, word);
 
+                    // Rendering the next word would exceed the bounds of the code box, so we drop it to a new line
                     if (pen_x + word_metrics.advance.x + char_width > max_width) {
+                        // Starts a new line, and places the pen at the beginning of the row
                         pen_y += line_height;
                         pen_x = margin_x;
-                        std.log.debug("USING WHITESPACE:|{s}|", .{starting_whitespace});
 
+                        // Renders the original line's whitespace, and adds a fixed offset for the next text
                         prepareRenderOfChunkAndIndentation(&gb, &font, &word_metrics, starting_whitespace);
-                        const pt = c.BLPoint{ .x = pen_x, .y = pen_y };
-                        // _ = c.bl_context_fill_glyph_run_d(ctx, &pt, &font, c.bl_glyph_buffer_get_glyph_run(&gb));
-                        _ = c.bl_context_fill_utf8_text_d(ctx, &pt, &font, starting_whitespace.ptr, starting_whitespace.len);
+                        try drawableChunks.append(allocator, .{
+                            .x = pen_x,
+                            .y = pen_y,
+                            .color = token.color,
+                            .text = starting_whitespace,
+                        });
                         pen_x += word_metrics.advance.x + indentation_padding;
                     }
 
-                    prepareRenderOfChunkAndIndentation(&gb, &font, &word_metrics, w);
-
-                    const pt = c.BLPoint{ .x = pen_x, .y = pen_y };
-                    // _ = c.bl_context_fill_glyph_run_d(ctx, &pt, &font, c.bl_glyph_buffer_get_glyph_run(&gb));
-                    _ = c.bl_context_fill_utf8_text_d(ctx, &pt, &font, w.ptr, w.len);
+                    // Renders the text and advances the pen_x position
+                    prepareRenderOfChunkAndIndentation(&gb, &font, &word_metrics, word);
+                    try drawableChunks.append(allocator, .{
+                        .x = pen_x,
+                        .y = pen_y,
+                        .color = token.color,
+                        .text = word,
+                    });
 
                     pen_x += word_metrics.advance.x;
                 }
             }
         }
+    }
+    
+    return drawableChunks;
+}
+
+fn drawDrawableChunks(ctx: *c.BLContextCore, chunks: []DrawableChunk) !void {
+    var face: c.BLFontFaceCore = undefined;
+    _ = c.bl_font_face_init(&face);
+    defer _ = c.bl_font_face_reset(&face);
+
+    var font_data: c.BLFontDataCore = undefined;
+    _ = c.bl_font_data_init(&font_data);
+    defer _ = c.bl_font_data_reset(&font_data);
+
+    if (c.bl_font_data_create_from_data(&font_data, font_bytes.ptr, font_bytes.len, null, null) != c.BL_SUCCESS) {
+        return error.FontDataCreationFailed;
+    }
+
+    if (c.bl_font_face_create_from_data(&face, &font_data, 0) != c.BL_SUCCESS) {
+        return error.FontFaceCreationFailed;
+    }
+    
+    var font: c.BLFontCore = undefined;
+    const font_size = 16.0; // TODO from file
+    _ = c.bl_font_init(&font);
+    _ = c.bl_font_create_from_face(&font, &face, font_size); // TODO font size
+    defer _ = c.bl_font_reset(&font);
+    
+    
+    for (chunks) |chunk| {
+        const pt = c.BLPoint{ .x = chunk.x, .y = chunk.y };
+        _ = c.bl_context_set_fill_style_rgba32(ctx, chunk.color); // TODO color
+        _ = c.bl_context_fill_utf8_text_d(ctx, &pt, &font, chunk.text.ptr, chunk.text.len);
     }
 }
 
@@ -163,10 +205,18 @@ fn prepareRenderOfChunkAndIndentation(gb: *c.BLGlyphBufferCore, font: *c.BLFontC
     _ = c.bl_font_get_text_metrics(font, gb, word_metrics);
 }
 
-fn drawLineNumber(ctx: *c.BLContextCore, font: *c.BLFontCore, x: f64, y: f64, num: usize) void {
-    var buf: [8]u8 = undefined;
-    const str = std.fmt.bufPrint(&buf, "{d: >3}", .{num}) catch "   ";
-    _ = c.bl_context_set_fill_style_rgba32(ctx, 0xFF6272A4); // TODO color
-    const pt = c.BLPoint{ .x = x, .y = y };
-    _ = c.bl_context_fill_utf8_text_d(ctx, &pt, font, str.ptr, str.len);
+fn lineNumberDrawableChunk(allocator: std.mem.Allocator, x: f64, y: f64, num: usize) DrawableChunk {
+    return .{
+        .x = x,
+        .y = y,
+        .color = 0xFF6272A4,
+        .text = std.fmt.allocPrint(allocator, "{d: >3}", .{num}) catch "   ",
+    };
 }
+
+const DrawableChunk = struct {
+    x: f64,
+    y: f64,
+    color: u32, // Hex, e.g. 0xFF6272A4
+    text: []const u8,
+};
