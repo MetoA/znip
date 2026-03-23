@@ -93,7 +93,7 @@ pub fn build(b: *std.Build) void {
     const languages = [_][]const u8{ "zig", "rust", "javascript", "typescript", "python", "c", "cpp", "go", "html", "css", "java", "ruby", "php", "json", "markdown", "sql" };
 
     for (languages) |language| {
-        const repo_path = b.fmt("deps/tree-sitter-{s}", .{language});
+        const repo_path = b.fmt("src/deps/tree-sitter-{s}", .{language});
 
         // TODO check for other directories as well...
         const src_dir = b.pathJoin(&.{ repo_path, "src" });
@@ -107,7 +107,7 @@ pub fn build(b: *std.Build) void {
 
             const scanner_c = b.pathJoin(&.{ src_dir, "scanner.c" });
             const scanner_cc = b.pathJoin(&.{ src_dir, "scanner.cc" });
-            
+
             if (hasScanner(scanner_c)) {
                 exe.root_module.addCSourceFile(.{ .file = b.path(scanner_c), .flags = &.{ "-I", src_dir, "-std=c11", "-O3" } });
             }
@@ -118,7 +118,7 @@ pub fn build(b: *std.Build) void {
             }
         } else |err| {
             // TODO typescript php markdown
-            std.debug.print("Skipping {s}: parser.c not found in src/ ({s})\n", .{ language, @errorName(err) });
+            std.log.err("Skipping {s}: parser.c not found in src/ ({s})", .{ language, @errorName(err) });
         }
     }
 

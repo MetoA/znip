@@ -1,6 +1,8 @@
 .zig-cache/
 zig-out/
 *.o
+*.iml
+.idea
 
 # Ignore the test output file
 output.png
