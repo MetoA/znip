@@ -5,11 +5,42 @@ const c = @cImport({
     @cInclude("blend2d/blend2d.h");
 });
 
-const font_bytes = @embedFile("fonts/JetBrainsMono-Bold.ttf");
+const font_bytes = @embedFile("assets/fonts/JetBrainsMono-Bold.ttf");
+
+const CodeWindowOptions = struct {
+    x: f64,
+    y: f64,
+    margin_x: f64,
+    margin_y: f64,
+    width: f64,
+    height: f64,
+    radius: f64,
+    background_color: u32,
+    
+    
+    pub fn heightFromLastY(self: *CodeWindowOptions, last_y: f64) f64 {
+        const padding_bottom = 25.0;
+        return last_y + padding_bottom - self.margin_y;
+    }
+};
 
 pub fn generateImage(tokens: []const tree_sitter.Token) !void {
+    const drawableChunks = prepareDrawableChunks(tokens) catch |err| {
+        std.log.err("Failed to prepare chunks: {}", .{err});
+        return err;
+    };
+    for (drawableChunks.items) |chunk| {
+        std.log.debug("Chunk: x={d}, y={d}, text={s}", .{ chunk.x, chunk.y, chunk.text });
+    }
+
+    const last_chunk_height: f64 = if (drawableChunks.items.len > 0) drawableChunks.getLast().y else 300.0;
+    var code_window_options = codeWindowOptions();
+
+    const image_height = @as(i32, @intFromFloat(code_window_options.heightFromLastY(last_chunk_height) + 2 * code_window_options.margin_y));
+    const image_width = @as(i32, @intFromFloat(code_window_options.width + 2 * code_window_options.margin_x));
+
     var img: c.BLImageCore = undefined;
-    _ = c.bl_image_init_as(&img, 800, 400, c.BL_FORMAT_PRGB32);
+    _ = c.bl_image_init_as(&img, image_width, image_height, c.BL_FORMAT_PRGB32);
     defer _ = c.bl_image_reset(&img);
 
     var ctx: c.BLContextCore = undefined;
@@ -17,15 +48,9 @@ pub fn generateImage(tokens: []const tree_sitter.Token) !void {
     defer _ = c.bl_context_reset(&ctx);
 
     fillBackground(&ctx, 0xFF37A3FF);
-    drawCodeWindow(&ctx, 0xFF44475A);
-    const prep = prepareDrawableChunks(tokens) catch |err| {
-        std.log.err("Failed to prepare chunks: {}", .{err});
-        return err;
-    };
-    for (prep.items) |chunk| {
-        std.log.debug("Chunk: x={d}, y={d}, text={s}", .{ chunk.x, chunk.y, chunk.text });
-    }
-    try drawDrawableChunks(&ctx,prep.items);
+    drawCodeWindow(&ctx, code_window_options);
+
+    try drawDrawableChunks(&ctx, drawableChunks.items);
 
     var codec: c.BLImageCodecCore = undefined;
     _ = c.bl_image_codec_init(&codec);
@@ -41,9 +66,9 @@ fn fillBackground(ctx: *c.BLContextCore, color: u32) void {
     _ = c.bl_context_fill_all(ctx);
 }
 
-fn drawCodeWindow(ctx: *c.BLContextCore, color: u32) void {
-    const rect = c.BLRoundRect{ .x = 50, .y = 50, .w = 700, .h = 300, .rx = 12, .ry = 12 };
-    _ = c.bl_context_set_fill_style_rgba32(ctx, color);
+fn drawCodeWindow(ctx: *c.BLContextCore, options: CodeWindowOptions) void {
+    const rect = c.BLRoundRect{ .x = options.x, .y = options.y, .w = options.width, .h = options.height, .rx = options.radius, .ry = options.radius };
+    _ = c.bl_context_set_fill_style_rgba32(ctx, options.background_color);
     _ = c.bl_context_fill_geometry(ctx, c.BL_GEOMETRY_TYPE_ROUND_RECT, &rect);
 
     drawCodeWindowControls(ctx);
@@ -96,7 +121,7 @@ fn prepareDrawableChunks(tokens: []const tree_sitter.Token) !std.ArrayList(Drawa
 
     var metrics: c.BLFontMetrics = undefined;
     _ = c.bl_font_get_metrics(&font, &metrics);
-    
+
     const ascent = metrics.unnamed_0.unnamed_0.ascent;
     const descent = metrics.unnamed_0.unnamed_0.descent;
     const line_height = ascent + descent + metrics.line_gap;
@@ -105,12 +130,12 @@ fn prepareDrawableChunks(tokens: []const tree_sitter.Token) !std.ArrayList(Drawa
     const margin_x: f64 = 100.0;
     const margin_y: f64 = 100.0;
     const max_width: f64 = 700.0; // TODO based on longest line width?
-    
+
     var pen_x = margin_x;
     var pen_y = margin_y + ascent;
     var line_num: usize = 1;
-    
-    try drawableChunks.append(allocator, lineNumberDrawableChunk(allocator, 45.0, pen_y, line_num));
+
+    try drawableChunks.append(allocator, lineNumberDrawableChunk(allocator, 55.0, pen_y, line_num));
 
     for (tokens) |token| {
         var it = std.mem.splitScalar(u8, token.text, '\n');
@@ -123,7 +148,7 @@ fn prepareDrawableChunks(tokens: []const tree_sitter.Token) !std.ArrayList(Drawa
                 line_num += 1;
                 pen_x = margin_x;
                 pen_y += line_height;
-                try drawableChunks.append(allocator, lineNumberDrawableChunk(allocator, 45.0, pen_y, line_num));
+                try drawableChunks.append(allocator, lineNumberDrawableChunk(allocator, 55.0, pen_y, line_num));
             }
             first_part = false;
 
@@ -164,7 +189,7 @@ fn prepareDrawableChunks(tokens: []const tree_sitter.Token) !std.ArrayList(Drawa
             }
         }
     }
-    
+
     return drawableChunks;
 }
 
@@ -184,14 +209,13 @@ fn drawDrawableChunks(ctx: *c.BLContextCore, chunks: []DrawableChunk) !void {
     if (c.bl_font_face_create_from_data(&face, &font_data, 0) != c.BL_SUCCESS) {
         return error.FontFaceCreationFailed;
     }
-    
+
     var font: c.BLFontCore = undefined;
     const font_size = 16.0; // TODO from file
     _ = c.bl_font_init(&font);
     _ = c.bl_font_create_from_face(&font, &face, font_size); // TODO font size
     defer _ = c.bl_font_reset(&font);
-    
-    
+
     for (chunks) |chunk| {
         const pt = c.BLPoint{ .x = chunk.x, .y = chunk.y };
         _ = c.bl_context_set_fill_style_rgba32(ctx, chunk.color); // TODO color
@@ -211,6 +235,25 @@ fn lineNumberDrawableChunk(allocator: std.mem.Allocator, x: f64, y: f64, num: us
         .y = y,
         .color = 0xFF6272A4,
         .text = std.fmt.allocPrint(allocator, "{d: >3}", .{num}) catch "   ",
+    };
+}
+
+fn codeWindowOptions() CodeWindowOptions {
+    const margin_x = 50.0;
+    const margin_y = 50.0;
+    const height = 400;
+    const width = 700.0;
+    const radius = 12.0;
+    
+    return .{
+        .x = margin_x,
+        .y = margin_y,
+        .margin_x = margin_x,
+        .margin_y = margin_y,
+        .width = width,
+        .height = height,
+        .radius = radius,
+        .background_color = 0xFF44475A,
     };
 }
 

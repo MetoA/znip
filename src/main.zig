@@ -14,6 +14,10 @@ pub fn main() !void {
         \\  {
         \\      std.debug.print("Hello one two three something long", .{});
         \\  }
+        \\  std.debug.print("MATCH: start_byte={} end_byte={} tag={s}\n something else", .{ match.start_byte, match.end_byte, match.tag });
+        \\  {
+        \\      std.debug.print("Hello one two three something long", .{});
+        \\  }
         \\}
     ;
 
