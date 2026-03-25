@@ -1,6 +1,10 @@
 //! By convention, root.zig is the root source file when making a library.
 const std = @import("std");
 
+pub const assets = struct {
+    pub const font_jet_brains_mono_bold = @embedFile("assets/fonts/JetBrainsMono-Bold.ttf");
+};
+
 pub const SplitInclusiveIterator = struct {
     buffer: []const u8,
     delimiter: []const u8,
