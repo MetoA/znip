@@ -94,10 +94,10 @@ pub const Parser = struct {
 
                 var name_len: u32 = 0;
                 const name_ptr = c.ts_query_capture_name_for_id(query, capture.index, &name_len);
-                const tag = name_ptr[0..name_len]; // @variable, @type, @constant...
+                const capture_name = name_ptr[0..name_len]; // @variable, @type, @constant...
                 const text = &self.source_code[start_byte..end_byte]; // main, pub, (), {}...
 
-                std.log.debug("Found '{s}' at {d}:{d} -> Type: @{s}", .{ text, start_byte, end_byte, tag });
+                std.log.debug("Found '{s}' at {d}:{d} -> Type: @{s}", .{ text, start_byte, end_byte, capture_name });
 
                 // Skips same match that has multiple tags, e.g. "mainmainmain"
                 if (matches.items.len > 0) {
@@ -108,7 +108,7 @@ pub const Parser = struct {
                 try matches.append(&self.allocator, .{
                     .start_byte = start_byte,
                     .end_byte = end_byte,
-                    .tag = tag,
+                    .capture_name = capture_name,
                 });
             }
         }
@@ -130,14 +130,14 @@ pub const Parser = struct {
                 const is_newline = std.mem.eql(u8, gap_text, "\n");
                 try tokens.append(&self.allocator, .{
                     .text = gap_text,
-                    .tag = match.tag,
+                    .capture_name = match.capture_name,
                     .is_newline = is_newline,
                 });
             }
 
             try tokens.append(&self.allocator, .{
                 .text = &self.source_code[match.start_byte..match.end_byte],
-                .tag = match.tag,
+                .capture_name = match.capture_name,
                 .is_newline = false,
             });
 
@@ -150,7 +150,7 @@ pub const Parser = struct {
             const is_newline = std.mem.eql(u8, gap_text, "\n");
             try tokens.append(&self.allocator, .{
                 .text = &self.source_code[current_byte..],
-                .tag = "",
+                .capture_name = "",
                 .is_newline = is_newline,
             });
         }
@@ -161,14 +161,14 @@ pub const Parser = struct {
 
 pub const Token = struct {
     text: []const u8,
-    tag: []const u8,
+    capture_name: []const u8,
     is_newline: bool,
 };
 
 pub const Match = struct {
     start_byte: u32,
     end_byte: u32,
-    tag: []const u8,
+    capture_name: []const u8,
 };
 
 pub const TokenCategory = enum {
@@ -182,4 +182,25 @@ pub const TokenCategory = enum {
     punctuation,
     type_def,
     variable,
+    default_text,
+
+    pub fn categorizeCapture(capture_name: []const u8) TokenCategory {
+        std.log.debug("Capture name {s}", .{capture_name});
+        if (std.mem.startsWith(u8, capture_name, "keyword")) return .keyword;
+        if (std.mem.startsWith(u8, capture_name, "constant")) return .constant;
+        if (std.mem.startsWith(u8, capture_name, "function")) return .function;
+        if (std.mem.startsWith(u8, capture_name, "type")) return .type_def;
+        if (std.mem.startsWith(u8, capture_name, "variable")) return .variable;
+        if (std.mem.startsWith(u8, capture_name, "field")) return .variable;
+        if (std.mem.startsWith(u8, capture_name, "string")) return .literal;
+        if (std.mem.startsWith(u8, capture_name, "number")) return .literal;
+        if (std.mem.startsWith(u8, capture_name, "boolean")) return .literal;
+        if (std.mem.startsWith(u8, capture_name, "comment")) return .comment;
+        if (std.mem.startsWith(u8, capture_name, "operator")) return .operator;
+        if (std.mem.startsWith(u8, capture_name, "punctuation")) return .operator;
+        if (std.mem.startsWith(u8, capture_name, "attribute")) return .builtin;
+        if (std.mem.startsWith(u8, capture_name, "constant.builtin")) return .builtin;
+
+        return .default_text;
+}
 };
