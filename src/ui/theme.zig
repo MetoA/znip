@@ -10,6 +10,7 @@ pub const Style = struct {
 
 pub const Theme = struct {
     bg: Color,
+    code_bg: Color,
     fg: Color,
     gutter_bg: Color,
     line_num: Color,
@@ -32,7 +33,7 @@ pub const Theme = struct {
             .literal => self.literal,
             .variable => self.variable,
             .operator => self.operator,
-            .text => Style{ .fg = self.fg },
+            .default_text => Style{ .fg = self.fg },
             else => Style{ .fg = self.fg },
         };
     }
@@ -40,7 +41,8 @@ pub const Theme = struct {
 
 // TODO placeholder?
 pub const DraculaTheme: Theme = .{
-    .bg = 0xFF282A36,
+    .bg = 0xFF54BFAF,
+    .code_bg = 0xFF282A36,
     .fg = 0xFFF8F8F2,
     .gutter_bg = 0xFF282A36,
     .line_num = 0xFFF8F8F2,

@@ -1,27 +1,37 @@
-//! By convention, root.zig is the root source file when making a library.
 const std = @import("std");
+const tree_sitter = @import("core/tree_sitter.zig");
+const ui_renderer = @import("ui/renderer.zig");
 
-pub const assets = struct {
-    pub const font_jet_brains_mono_bold = @embedFile("assets/fonts/JetBrainsMono-Bold.ttf");
-};
+pub fn renderImage(source_code: [:0]const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
-pub const SplitInclusiveIterator = struct {
-    buffer: []const u8,
-    delimiter: []const u8,
-    index: ?usize,
+    var renderer = try ui_renderer.Renderer.init(allocator);
+    defer renderer.deinit();
 
-    pub fn next(self: *SplitInclusiveIterator) ?[]const u8 {
-        const start = self.index orelse return null;
+    var parser = tree_sitter.Parser.init(allocator, source_code);
 
-        if (std.mem.indexOfPos(u8, self.buffer, start, self.delimiter)) |delim_idx| {
-            const end = delim_idx + self.delimiter.len;
-            self.index = end;
-            return self.buffer[start..end];
-        } else {
-            // Returns the remainder of the string
-            const remainder = self.buffer[start..];
-            self.index = null; // Marks as finished
-            return if (remainder.len > 0) remainder else null;
-        }
-    }
-};
+    const matches = try parser.sourceCodeMatches();
+    std.log.debug("matches: {d}", .{matches.items.len});
+    const tokens = try parser.sourceCodeTokens(matches);
+    std.log.debug("tokens: {d}", .{tokens.items.len});
+    const chunks = try renderer.prepareDrawableChunks(tokens.items);
+    std.log.debug("chunks: {d}", .{chunks.items.len});
+    const last_chunk_height: f64 = if (chunks.items.len > 0) chunks.getLast().y else 300.0;
+    // for (chunks.items) |value| {
+    // std.log.debug("CHUNK Y: {d}", .{value.y});
+    // }
+    renderer.initImage(last_chunk_height);
+    std.log.debug("inited img", .{});
+    renderer.fillBackground();
+    std.log.debug("filled bg", .{});
+    renderer.drawCodeWindow();
+    std.log.debug("drawn code window", .{});
+    renderer.drawCodeWindowControls();
+    std.log.debug("drawn code window controls", .{});
+    renderer.drawChunks(chunks.items);
+    std.log.debug("drawn chunks", .{});
+    renderer.saveImage();
+    std.log.debug("Saved image", .{});
+}

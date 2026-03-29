@@ -20,22 +20,22 @@ extern fn tree_sitter_typescript() *c.TSLanguage;
 extern fn tree_sitter_zig() *c.TSLanguage;
 
 const HighlightsQueryMap = struct {
-    pub const c = @embedFile("deps/tree-sitter-c/queries/highlights.scm");
-    pub const cpp = @embedFile("deps/tree-sitter-cpp/queries/highlights.scm");
-    pub const css = @embedFile("deps/tree-sitter-css/queries/highlights.scm");
-    pub const go = @embedFile("deps/tree-sitter-go/queries/highlights.scm");
-    pub const html = @embedFile("deps/tree-sitter-html/queries/highlights.scm");
-    pub const java = @embedFile("deps/tree-sitter-java/queries/highlights.scm");
-    pub const javascript = @embedFile("deps/tree-sitter-javascript/queries/highlights.scm");
-    pub const json = @embedFile("deps/tree-sitter-json/queries/highlights.scm");
-    pub const markdown = @embedFile("deps/tree-sitter-markdown/tree-sitter-markdown/queries/highlights.scm");
-    pub const php = @embedFile("deps/tree-sitter-php/queries/highlights.scm");
-    pub const python = @embedFile("deps/tree-sitter-python/queries/highlights.scm");
-    pub const ruby = @embedFile("deps/tree-sitter-ruby/queries/highlights.scm");
-    pub const rust = @embedFile("deps/tree-sitter-rust/queries/highlights.scm");
-    pub const sql = @embedFile("deps/tree-sitter-sql/queries/highlights.scm");
-    pub const typescript = @embedFile("deps/tree-sitter-typescript/queries/highlights.scm");
-    pub const zig = @embedFile("deps/tree-sitter-zig/queries/highlights.scm");
+    pub const c = @embedFile("../deps/tree-sitter-c/queries/highlights.scm");
+    pub const cpp = @embedFile("../deps/tree-sitter-cpp/queries/highlights.scm");
+    pub const css = @embedFile("../deps/tree-sitter-css/queries/highlights.scm");
+    pub const go = @embedFile("../deps/tree-sitter-go/queries/highlights.scm");
+    pub const html = @embedFile("../deps/tree-sitter-html/queries/highlights.scm");
+    pub const java = @embedFile("../deps/tree-sitter-java/queries/highlights.scm");
+    pub const javascript = @embedFile("../deps/tree-sitter-javascript/queries/highlights.scm");
+    pub const json = @embedFile("../deps/tree-sitter-json/queries/highlights.scm");
+    pub const markdown = @embedFile("../deps/tree-sitter-markdown/tree-sitter-markdown/queries/highlights.scm");
+    pub const php = @embedFile("../deps/tree-sitter-php/queries/highlights.scm");
+    pub const python = @embedFile("../deps/tree-sitter-python/queries/highlights.scm");
+    pub const ruby = @embedFile("../deps/tree-sitter-ruby/queries/highlights.scm");
+    pub const rust = @embedFile("../deps/tree-sitter-rust/queries/highlights.scm");
+    pub const sql = @embedFile("../deps/tree-sitter-sql/queries/highlights.scm");
+    pub const typescript = @embedFile("../deps/tree-sitter-typescript/queries/highlights.scm");
+    pub const zig = @embedFile("../deps/tree-sitter-zig/queries/highlights.scm");
 };
 
 pub const Parser = struct {
@@ -50,8 +50,6 @@ pub const Parser = struct {
         return self;
     }
 
-    // pub fn deinit(self: *Parser) void {}
-
     pub fn sourceCodeMatches(self: *Parser) !std.ArrayList(Match) {
         // TODO Use the correct highlights query based on the language used
         const query_source = HighlightsQueryMap.zig;
@@ -63,7 +61,7 @@ pub const Parser = struct {
         const lang = tree_sitter_zig();
         _ = c.ts_parser_set_language(parser, lang);
 
-        const tree = c.ts_parser_parse_string(parser, null, &self.source_code.ptr, @intCast(&self.source_code.len)) orelse return error.ParseFailed;
+        const tree = c.ts_parser_parse_string(parser, null, self.source_code.ptr, @intCast(self.source_code.len)) orelse return error.ParseFailed;
         defer c.ts_tree_delete(tree);
 
         var error_offset: u32 = 0;
@@ -84,7 +82,6 @@ pub const Parser = struct {
         var matches = std.ArrayList(Match).empty;
         var match: c.TSQueryMatch = undefined;
         while (c.ts_query_cursor_next_match(cursor, &match)) {
-            std.log.debug("WHILE: ", .{});
             for (0..match.capture_count) |i| {
                 const capture = match.captures[i];
                 const node = capture.node;
@@ -95,7 +92,7 @@ pub const Parser = struct {
                 var name_len: u32 = 0;
                 const name_ptr = c.ts_query_capture_name_for_id(query, capture.index, &name_len);
                 const capture_name = name_ptr[0..name_len]; // @variable, @type, @constant...
-                const text = &self.source_code[start_byte..end_byte]; // main, pub, (), {}...
+                const text = self.source_code[start_byte..end_byte]; // main, pub, (), {}...
 
                 std.log.debug("Found '{s}' at {d}:{d} -> Type: @{s}", .{ text, start_byte, end_byte, capture_name });
 
@@ -105,7 +102,7 @@ pub const Parser = struct {
                     if (start_byte < last.end_byte) continue;
                 }
 
-                try matches.append(&self.allocator, .{
+                try matches.append(self.allocator, .{
                     .start_byte = start_byte,
                     .end_byte = end_byte,
                     .capture_name = capture_name,
@@ -126,17 +123,17 @@ pub const Parser = struct {
 
             // Next match skips a byte, it is a white space, tab, newline...
             if (match.start_byte > current_byte) {
-                const gap_text = &self.source_code[current_byte..match.start_byte];
+                const gap_text = self.source_code[current_byte..match.start_byte];
                 const is_newline = std.mem.eql(u8, gap_text, "\n");
-                try tokens.append(&self.allocator, .{
+                try tokens.append(self.allocator, .{
                     .text = gap_text,
                     .capture_name = match.capture_name,
                     .is_newline = is_newline,
                 });
             }
 
-            try tokens.append(&self.allocator, .{
-                .text = &self.source_code[match.start_byte..match.end_byte],
+            try tokens.append(self.allocator, .{
+                .text = self.source_code[match.start_byte..match.end_byte],
                 .capture_name = match.capture_name,
                 .is_newline = false,
             });
@@ -145,11 +142,11 @@ pub const Parser = struct {
         }
 
         // Leftover bytes after last match
-        if (current_byte < &self.source_code.len) {
-            const gap_text = &self.source_code[current_byte..];
+        if (current_byte < self.source_code.len) {
+            const gap_text = self.source_code[current_byte..];
             const is_newline = std.mem.eql(u8, gap_text, "\n");
-            try tokens.append(&self.allocator, .{
-                .text = &self.source_code[current_byte..],
+            try tokens.append(self.allocator, .{
+                .text = self.source_code[current_byte..],
                 .capture_name = "",
                 .is_newline = is_newline,
             });
@@ -202,5 +199,5 @@ pub const TokenCategory = enum {
         if (std.mem.startsWith(u8, capture_name, "constant.builtin")) return .builtin;
 
         return .default_text;
-}
+    }
 };
