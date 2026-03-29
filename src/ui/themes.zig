@@ -1,0 +1,116 @@
+const theme = @import("theme.zig");
+
+// TODO precisely check all, make many popular themes
+pub const OneDarker = theme.Theme{
+    .name = "One Darker",
+    .ui = .{
+        .background = 0xFF1A1D23,
+        .code_window_background = 0xFF21252B,
+        .foreground = 0xFFABB2BF,
+        .line_number = 0xFF4B5263,
+    },
+    .syntax = .{
+        .comment = .{ .color = 0xFF5C6370, .italic = true },
+        .constant = .{ .color = 0xFFD19A66 },
+        .constructor = .{ .color = 0xFFE5C07B },
+        .function = .{ .color = 0xFF61AFEF },
+        .keyword = .{ .color = 0xFFC678DD },
+        .keyword_control = .{ .color = 0xFFC678DD, .italic = true },
+        .label = .{ .color = 0xFFE06C75 },
+        .number = .{ .color = 0xFFD19A66 },
+        .operator = .{ .color = 0xFF56B6C2 },
+        .property = .{ .color = 0xFFE06C75 },
+        .punctuation = .{ .color = 0xFFABB2BF },
+        .string = .{ .color = 0xFF98C379 },
+        .type = .{ .color = 0xFFE5C07B },
+        .variable = .{ .color = 0xFFABB2BF },
+        .variable_builtin = .{ .color = 0xFFE06C75, .italic = true },
+    },
+};
+
+pub const MidnightAurora = theme.Theme{
+    .name = "Midnight Aurora",
+    .ui = .{
+        .background = 0xFF0F172A,
+        .code_window_background = 0xFF1E293B,
+        .foreground = 0xFFF8FAFC,
+        .line_number = 0xFF475569,
+    },
+    .syntax = .{
+        .comment = .{ .color = 0xFF64748B, .italic = true },
+        .comment_doc = .{ .color = 0xFF94A3B8, .italic = true },
+        .constant = .{ .color = 0xFF38BDF8 },
+        .constant_builtin = .{ .color = 0xFF7DD3FC, .bold = true },
+        .constructor = .{ .color = 0xFFF472B6 },
+        .function = .{ .color = 0xFF2DD4BF },
+        .function_call = .{ .color = 0xFF5EEAD4 },
+        .keyword = .{ .color = 0xFFC084FC, .bold = true },
+        .keyword_return = .{ .color = 0xFFE879F9, .bold = true, .italic = true },
+        .label = .{ .color = 0xFFFB7185 },
+        .number = .{ .color = 0xFFFACC15 },
+        .operator = .{ .color = 0xFF818CF8 },
+        .property = .{ .color = 0xFF94A3B8 },
+        .punctuation = .{ .color = 0xFFCBD5E1 },
+        .string = .{ .color = 0xFF4ADE80 },
+        .type = .{ .color = 0xFFFB923C },
+        .variable = .{ .color = 0xFFF8FAFC },
+        .variable_parameter = .{ .color = 0xFFFDBA74, .italic = true },
+    },
+};
+
+pub const SolarizedLight = theme.Theme{
+    .name = "Solarized Light",
+    .ui = .{
+        .background = 0xFFEEE8D5,
+        .code_window_background = 0xFFFDF6E3,
+        .foreground = 0xFF657B83,
+        .line_number = 0xFF93A1A1,
+    },
+    .syntax = .{
+        .comment = .{ .color = 0xFF93A1A1, .italic = true },
+        .constant = .{ .color = 0xFFCB4B16 },
+        .constant_builtin = .{ .color = 0xFFCB4B16, .bold = true },
+        .constructor = .{ .color = 0xFF268BD2 },
+        .function = .{ .color = 0xFF268BD2 },
+        .function_call = .{ .color = 0xFF268BD2 },
+        .keyword = .{ .color = 0xFF859900, .bold = true },
+        .keyword_control = .{ .color = 0xFF859900, .bold = true, .italic = true },
+        .label = .{ .color = 0xFFD33682 },
+        .number = .{ .color = 0xFF2AA198 },
+        .operator = .{ .color = 0xFF657B83 },
+        .property = .{ .color = 0xFF268BD2 },
+        .punctuation = .{ .color = 0xFF657B83 },
+        .string = .{ .color = 0xFF2AA198 },
+        .type = .{ .color = 0xFFB58900 },
+        .variable = .{ .color = 0xFF268BD2 },
+        .variable_parameter = .{ .color = 0xFF657B83, .italic = true },
+    },
+};
+
+pub const PaperWhite = theme.Theme{
+    .name = "Paper White",
+    .ui = .{
+        .background = 0xFFF0F0F0,
+        .code_window_background = 0xFFFFFFFF,
+        .foreground = 0xFF24292E,
+        .line_number = 0xFFBBBBBB,
+    },
+    .syntax = .{
+        .comment = .{ .color = 0xFF6A737D, .italic = true },
+        .constant = .{ .color = 0xFF005CC5 },
+        .constructor = .{ .color = 0xFFD73A49 },
+        .function = .{ .color = 0xFF6F42C1 },
+        .function_call = .{ .color = 0xFF6F42C1 },
+        .keyword = .{ .color = 0xFFD73A49, .bold = true },
+        .keyword_return = .{ .color = 0xFFD73A49, .bold = true },
+        .label = .{ .color = 0xFF24292E },
+        .number = .{ .color = 0xFF005CC5 },
+        .operator = .{ .color = 0xFFD73A49 },
+        .property = .{ .color = 0xFFE36209 },
+        .punctuation = .{ .color = 0xFF24292E },
+        .string = .{ .color = 0xFF032F62 },
+        .type = .{ .color = 0xFFD73A49 },
+        .variable = .{ .color = 0xFF24292E },
+        .variable_parameter = .{ .color = 0xFFE36209, .italic = true },
+    },
+};

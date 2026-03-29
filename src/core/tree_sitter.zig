@@ -169,35 +169,75 @@ pub const Match = struct {
 };
 
 pub const TokenCategory = enum {
-    builtin,
     comment,
     constant,
+    constructor,
+    field,
     function,
+    function_builtin,
+    function_call,
+    function_method,
     keyword,
-    literal,
-    operator,
+    keyword_function,
+    keyword_modifier,
+    keyword_operator,
+    keyword_return,
+    property,
     punctuation,
-    type_def,
+    punctuation_bracket,
+    punctuation_delimiter,
+    string,
+    string_escape,
+    string_special,
+    tag,
+    tag_attribute,
+    type,
+    type_builtin,
     variable,
+    variable_builtin,
+    variable_member,
+    variable_parameter,
     default_text,
 
     pub fn categorizeCapture(capture_name: []const u8) TokenCategory {
-        std.log.debug("Capture name {s}", .{capture_name});
-        if (std.mem.startsWith(u8, capture_name, "keyword")) return .keyword;
-        if (std.mem.startsWith(u8, capture_name, "constant")) return .constant;
-        if (std.mem.startsWith(u8, capture_name, "function")) return .function;
-        if (std.mem.startsWith(u8, capture_name, "type")) return .type_def;
+        if (std.mem.startsWith(u8, capture_name, "variable.parameter")) return .variable_parameter;
+        if (std.mem.startsWith(u8, capture_name, "variable.member")) return .variable_member;
+        if (std.mem.startsWith(u8, capture_name, "variable.builtin")) return .variable_builtin;
         if (std.mem.startsWith(u8, capture_name, "variable")) return .variable;
-        if (std.mem.startsWith(u8, capture_name, "field")) return .variable;
-        if (std.mem.startsWith(u8, capture_name, "string")) return .literal;
-        if (std.mem.startsWith(u8, capture_name, "number")) return .literal;
-        if (std.mem.startsWith(u8, capture_name, "boolean")) return .literal;
-        if (std.mem.startsWith(u8, capture_name, "comment")) return .comment;
-        if (std.mem.startsWith(u8, capture_name, "operator")) return .operator;
-        if (std.mem.startsWith(u8, capture_name, "punctuation")) return .operator;
-        if (std.mem.startsWith(u8, capture_name, "attribute")) return .builtin;
-        if (std.mem.startsWith(u8, capture_name, "constant.builtin")) return .builtin;
-
+        
+        if (std.mem.startsWith(u8, capture_name, "type.builtin")) return .type_builtin;
+        if (std.mem.startsWith(u8, capture_name, "type")) return .type;
+        
+        if (std.mem.startsWith(u8, capture_name, "tag.attribute")) return .tag_attribute;
+        if (std.mem.startsWith(u8, capture_name, "tag")) return .tag;
+        
+        if (std.mem.startsWith(u8, capture_name, "string.special")) return .string_special;
+        if (std.mem.startsWith(u8, capture_name, "string.escape")) return .string_escape;
+        if (std.mem.startsWith(u8, capture_name, "string")) return .string;
+        
+        if (std.mem.startsWith(u8, capture_name, "punctuation.delimiter")) return .punctuation_delimiter;
+        if (std.mem.startsWith(u8, capture_name, "punctuation.bracket")) return .punctuation_bracket;
+        if (std.mem.startsWith(u8, capture_name, "punctuation")) return .punctuation;
+        
+        if (std.mem.startsWith(u8, capture_name, "property")) return .property;
+        
+        if (std.mem.startsWith(u8, capture_name, "keyword.return")) return .keyword_return;
+        if (std.mem.startsWith(u8, capture_name, "keyword.operator")) return .keyword_operator;
+        if (std.mem.startsWith(u8, capture_name, "keyword.modifier")) return .keyword_modifier;
+        if (std.mem.startsWith(u8, capture_name, "keyword.function")) return .keyword_function;
+        if (std.mem.startsWith(u8, capture_name, "keyword")) return .keyword;
+        
+        if (std.mem.startsWith(u8, capture_name, "function.method")) return .function_method;
+        if (std.mem.startsWith(u8, capture_name, "function.call")) return .function_call;
+        if (std.mem.startsWith(u8, capture_name, "function.builtin")) return .function_builtin;
+        if (std.mem.startsWith(u8, capture_name, "function")) return .function;
+        
+        if (std.mem.startsWith(u8, capture_name, "field")) return .field;
+        
+        if (std.mem.startsWith(u8, capture_name, "constructor")) return .constructor;
+        
+        if (std.mem.startsWith(u8, capture_name, "constant")) return .constant;
+        
         return .default_text;
     }
 };

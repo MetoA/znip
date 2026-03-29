@@ -1,89 +1,93 @@
 const tree_sitter = @import("../core/tree_sitter.zig");
 
-pub const Color = u32; // ARGB
+const Color = u32; // ARGB
 
-pub const Style = struct {
-    fg: Color,
+const Style = struct {
+    color: Color,
     bold: bool = false,
     italic: bool = false,
+    underline: bool = false,
+};
+
+const Ui = struct {
+    background: Color,
+    code_window_background: Color,
+    foreground: Color,
+    line_number: Color,
+};
+
+const Syntax = struct {
+    comment: Style,
+    comment_doc: ?Style = null,
+    constant: Style,
+    constant_builtin: ?Style = null,
+    constant_character: ?Style = null,
+    constant_macro: ?Style = null,
+    constructor: Style,
+    function: Style,
+    function_builtin: ?Style = null,
+    function_call: ?Style = null,
+    function_method: ?Style = null,
+    keyword: Style,
+    keyword_function: ?Style = null,
+    keyword_modifier: ?Style = null,
+    keyword_operator: ?Style = null,
+    keyword_return: ?Style = null,
+    keyword_control: ?Style = null,
+    label: Style,
+    number: Style,
+    operator: Style,
+    property: Style,
+    punctuation: Style,
+    punctuation_bracket: ?Style = null,
+    punctuation_delimiter: ?Style = null,
+    string: Style,
+    string_escape: ?Style = null,
+    string_regex: ?Style = null,
+    type: Style,
+    type_builtin: ?Style = null,
+    variable: Style,
+    variable_builtin: ?Style = null,
+    variable_member: ?Style = null,
+    variable_parameter: ?Style = null,
 };
 
 pub const Theme = struct {
-    bg: Color,
-    code_bg: Color,
-    fg: Color,
-    gutter_bg: Color,
-    line_num: Color,
-
-    keyword: Style,
-    function: Style,
-    type_def: Style,
-    comment: Style,
-    string: Style,
-    literal: Style,
-    variable: Style,
-    operator: Style,
-
+    name: []const u8,
+    ui: Ui,
+    syntax: Syntax,
+    
     pub fn getStyle(self: *Theme, category: tree_sitter.TokenCategory) Style {
         return switch (category) {
-            .keyword => self.keyword,
-            .function => self.function,
-            .type_def => self.type_def,
-            .comment => self.comment,
-            .literal => self.literal,
-            .variable => self.variable,
-            .operator => self.operator,
-            .default_text => Style{ .fg = self.fg },
-            else => Style{ .fg = self.fg },
+            .comment => self.syntax.comment,
+            .constant => self.syntax.constant,
+            .constructor => self.syntax.constructor,
+            .field => self.syntax.property,
+            .function => self.syntax.function,
+            .function_builtin => self.syntax.function_builtin orelse self.syntax.function,
+            .function_call => self.syntax.function_call orelse self.syntax.function,
+            .function_method => self.syntax.function_method orelse self.syntax.function,
+            .keyword => self.syntax.keyword,
+            .keyword_function => self.syntax.keyword_function orelse self.syntax.keyword,
+            .keyword_modifier => self.syntax.keyword_modifier orelse self.syntax.keyword,
+            .keyword_operator => self.syntax.keyword_operator orelse self.syntax.keyword,
+            .keyword_return => self.syntax.keyword_return orelse self.syntax.keyword,
+            .property => self.syntax.property,
+            .punctuation => self.syntax.punctuation,
+            .punctuation_bracket => self.syntax.punctuation_bracket orelse self.syntax.punctuation,
+            .punctuation_delimiter => self.syntax.punctuation_delimiter orelse self.syntax.punctuation,
+            .string => self.syntax.string,
+            .string_escape => self.syntax.string_escape orelse self.syntax.string,
+            .string_special => self.syntax.string_regex orelse self.syntax.string,
+            .tag => self.syntax.keyword,
+            .tag_attribute => self.syntax.property,
+            .type => self.syntax.type,
+            .type_builtin => self.syntax.type_builtin orelse self.syntax.type,
+            .variable => self.syntax.variable,
+            .variable_builtin => self.syntax.variable_builtin orelse self.syntax.variable,
+            .variable_member => self.syntax.variable_member orelse self.syntax.variable,
+            .variable_parameter => self.syntax.variable_parameter orelse self.syntax.variable,
+            .default_text => Style{ .color = self.ui.foreground },
         };
     }
-};
-
-// TODO placeholder?
-pub const DraculaTheme: Theme = .{
-    .bg = 0xFF54BFAF,
-    .code_bg = 0xFF282A36,
-    .fg = 0xFFF8F8F2,
-    .gutter_bg = 0xFF282A36,
-    .line_num = 0xFFF8F8F2,
-    .keyword = .{
-        .fg = 0xFFFF79C6,
-        .bold = false,
-        .italic = false,
-    },
-    .function = .{
-        .fg = 0xFF50FA7B,
-        .bold = false,
-        .italic = false,
-    },
-    .type_def = .{
-        .fg = 0xFF8BE9FD,
-        .bold = false,
-        .italic = false,
-    },
-    .comment = .{
-        .fg = 0xFF6272A4,
-        .bold = false,
-        .italic = false,
-    },
-    .string = .{
-        .fg = 0xFFF1FA8C,
-        .bold = false,
-        .italic = false,
-    },
-    .literal = .{
-        .fg = 0xFFFFB86C,
-        .bold = false,
-        .italic = false,
-    },
-    .variable = .{
-        .fg = 0xFFF8F8F2,
-        .bold = false,
-        .italic = false,
-    },
-    .operator = .{
-        .fg = 0xFFF8F8F2,
-        .bold = false,
-        .italic = false,
-    },
 };

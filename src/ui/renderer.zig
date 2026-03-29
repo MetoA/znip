@@ -3,6 +3,7 @@ const tree_sitter = @import("../core/tree_sitter.zig");
 const split_inclusive_iterator = @import("../util/split_inclusive_iterator.zig");
 const fonts = @import("../assets/fonts/fonts.zig");
 const theme = @import("theme.zig");
+const themes = @import("themes.zig");
 const c = @cImport({
     @cInclude("blend2d/blend2d.h");
 });
@@ -47,7 +48,8 @@ pub const Renderer = struct {
         _ = c.bl_font_create_from_face(&self.font, &self.face, font_size);
         errdefer _ = c.bl_font_reset(&self.font);
 
-        self.active_theme = theme.DraculaTheme;
+        // TODO
+        self.active_theme = themes.PaperWhite;
 
         self.code_window_options = .{
             .x = 50.0,
@@ -99,7 +101,7 @@ pub const Renderer = struct {
         try drawableChunks.append(self.allocator, .{
             .x = pen.x,
             .y = pen.y,
-            .color = self.active_theme.getStyle(tree_sitter.TokenCategory.default_text).fg,
+            .color = self.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
             .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
         });
         pen.positionAtTextStart();
@@ -116,7 +118,7 @@ pub const Renderer = struct {
                     try drawableChunks.append(self.allocator, .{
                         .x = pen.x,
                         .y = pen.y,
-                        .color = self.active_theme.getStyle(tree_sitter.TokenCategory.default_text).fg,
+                        .color = self.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
                         .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
                     });
                     pen.positionAtTextStart();
@@ -139,7 +141,7 @@ pub const Renderer = struct {
                             try drawableChunks.append(self.allocator, .{
                                 .x = pen.x,
                                 .y = pen.y,
-                                .color = self.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).fg,
+                                .color = self.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
                                 .text = self.starting_whitespace,
                             });
                             pen.advanceX(text_metrics.advance.x + font_metrics.indentation_padding);
@@ -149,7 +151,7 @@ pub const Renderer = struct {
                         try drawableChunks.append(self.allocator, .{
                             .x = pen.x,
                             .y = pen.y,
-                            .color = self.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).fg,
+                            .color = self.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
                             .text = word,
                         });
                         pen.advanceX(text_metrics.advance.x);
@@ -182,7 +184,7 @@ pub const Renderer = struct {
     }
 
     pub fn fillBackground(self: *Renderer) void {
-        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.bg);
+        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.background);
         _ = c.bl_context_fill_all(&self.context);
     }
 
@@ -195,7 +197,7 @@ pub const Renderer = struct {
             .rx = self.code_window_options.radius,
             .ry = self.code_window_options.radius,
         };
-        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.code_bg);
+        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.code_window_background);
         _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_ROUND_RECT, &rect);
     }
 
