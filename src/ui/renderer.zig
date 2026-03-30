@@ -237,7 +237,7 @@ pub const Renderer = struct {
                 .rx = code_rect.rx,
                 .ry = code_rect.ry,
             };
-            
+
             _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_ROUND_RECT, &rect);
         }
     }

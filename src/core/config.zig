@@ -21,7 +21,7 @@ const CodeWindowOptions = struct {
     max_width: f64 = 700.0,
     radius: f64 = 12.0,
     box_shadow: BoxShadowOptions = .{},
-    
+
     pub fn x(self: *CodeWindowOptions) f32 {
         return @as(f32, @floatFromInt(@intFromEnum(self.padding)));
     }
@@ -29,11 +29,11 @@ const CodeWindowOptions = struct {
     pub fn y(self: *CodeWindowOptions) f32 {
         return @as(f32, @floatFromInt(@intFromEnum(self.padding)));
     }
-    
+
     pub fn lineNumberX(self: *CodeWindowOptions) f64 {
         return self.x() + 5.0;
     }
-    
+
     pub fn windowControlsX(self: *CodeWindowOptions) f64 {
         return self.x() + 25.0;
     }
@@ -41,7 +41,7 @@ const CodeWindowOptions = struct {
     pub fn windowControlsY(self: *CodeWindowOptions) f64 {
         return self.y() + 25.0;
     }
-    
+
     pub fn codeStartX(self: *CodeWindowOptions) f32 {
         return self.x() + 50.0;
     }
@@ -60,7 +60,7 @@ pub const Config = struct {
     font_size: f32 = 16.0,
     code_window_options: CodeWindowOptions = .{},
     active_theme: Theme = themes.PaperWhite,
-    
+
     pub fn init() !Config {
         // TODO load from file?
         return .{};
