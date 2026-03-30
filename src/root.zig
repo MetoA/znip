@@ -29,7 +29,7 @@ pub fn renderImage(source_code: [:0]const u8) !void {
     std.log.debug("inited img", .{});
     renderer.fillBackground();
     std.log.debug("filled bg", .{});
-    renderer.drawCodeWindow(last_chunk_height);
+    try renderer.drawCodeWindow(last_chunk_height);
     std.log.debug("drawn code window", .{});
     renderer.drawCodeWindowControls();
     std.log.debug("drawn code window controls", .{});

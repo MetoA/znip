@@ -8,10 +8,19 @@ const CodeWindowPaddingSize = enum(u32) {
     xl = 100,
 };
 
+const BoxShadowOptions = struct {
+    enabled: bool = true,
+    offset_x: f64 = 0.0,
+    offset_y: f64 = 5.0,
+    blur: f64 = 20.0,
+    color: u32 = 0x10000000,
+};
+
 const CodeWindowOptions = struct {
     padding: CodeWindowPaddingSize = CodeWindowPaddingSize.md,
     max_width: f64 = 700.0,
     radius: f64 = 12.0,
+    box_shadow: BoxShadowOptions = .{},
     
     pub fn x(self: *CodeWindowOptions) f32 {
         return @as(f32, @floatFromInt(@intFromEnum(self.padding)));

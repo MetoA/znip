@@ -172,7 +172,7 @@ pub const Renderer = struct {
                 },
                 .line_continuation => {
                     try self.drawLineContinuationArrow(chunk.x, chunk.y, chunk.color);
-                }
+                },
             }
         }
     }
@@ -195,7 +195,7 @@ pub const Renderer = struct {
         _ = c.bl_context_fill_all(&self.context);
     }
 
-    pub fn drawCodeWindow(self: *Renderer, last_line_y: f64) void {
+    pub fn drawCodeWindow(self: *Renderer, last_line_y: f64) !void {
         const rect = c.BLRoundRect{
             .x = self.config.code_window_options.x(),
             .y = self.config.code_window_options.y(),
@@ -204,8 +204,42 @@ pub const Renderer = struct {
             .rx = self.config.code_window_options.radius,
             .ry = self.config.code_window_options.radius,
         };
+
+        if (self.config.code_window_options.box_shadow.enabled) {
+            try self.drawBoxShadow(rect);
+        }
         _ = c.bl_context_set_fill_style_rgba32(&self.context, self.config.active_theme.ui.code_window_background);
         _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_ROUND_RECT, &rect);
+    }
+
+    // Fake blur by rendering multiple gray rectangles with decreasing alpha values as they spread out
+    fn drawBoxShadow(self: *Renderer, code_rect: c.BLRoundRect) !void {
+        const box_shadow = self.config.code_window_options.box_shadow;
+        const passes: usize = 12;
+
+        var pass: usize = 0;
+        while (pass < passes) : (pass += 1) {
+            const spread_range = @as(f64, @floatFromInt(passes - pass)) / @as(f64, @floatFromInt(passes));
+            const spread = box_shadow.blur * spread_range;
+
+            // Alpha fades out toward the outer passes
+            const base_alpha: f64 = @as(f64, @floatFromInt((box_shadow.color >> 24) & 0xFF));
+            const alpha = @as(u32, @intFromFloat(base_alpha * (1.0 - spread_range) * (2.0 / @as(f64, @floatFromInt(passes)))));
+            const color = (alpha << 24) | (box_shadow.color & 0x00FFFFFF);
+
+            _ = c.bl_context_set_fill_style_rgba32(&self.context, color);
+
+            var rect = c.BLRoundRect{
+                .x = code_rect.x + box_shadow.offset_x - spread,
+                .y = code_rect.y + box_shadow.offset_y - spread,
+                .w = code_rect.w + spread * 2.0,
+                .h = code_rect.h + spread * 2.0,
+                .rx = code_rect.rx,
+                .ry = code_rect.ry,
+            };
+            
+            _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_ROUND_RECT, &rect);
+        }
     }
 
     pub fn drawCodeWindowControls(self: *Renderer) void {
@@ -225,11 +259,11 @@ pub const Renderer = struct {
         const origin = c.BLPoint{ .x = 0, .y = 0 };
         const size: f64 = 8.0;
         const offset_y: f64 = 2.0;
-        
+
         var path: c.BLPathCore = undefined;
         _ = c.bl_path_init(&path);
         defer _ = c.bl_path_reset(&path);
-        
+
         _ = c.bl_path_move_to(&path, x + size, y - (size * 1.2) - offset_y);
         _ = c.bl_path_line_to(&path, x + size, y - offset_y);
         _ = c.bl_path_line_to(&path, x, y - offset_y);
@@ -251,7 +285,7 @@ pub const Renderer = struct {
         const metrics = self.fontMetrics();
         // Center the arrow by moving it back a bit
         const y_with_offset = y - (metrics.line_height / 4.0);
-        
+
         var path: c.BLPathCore = undefined;
         _ = c.bl_path_init(&path);
         defer _ = c.bl_path_reset(&path);
@@ -262,11 +296,10 @@ pub const Renderer = struct {
         _ = c.bl_path_move_to(&path, x + size, y_with_offset);
         _ = c.bl_path_line_to(&path, x + (size * 0.6), y_with_offset + (size * 0.4));
 
-
         _ = c.bl_context_set_stroke_width(&self.context, 1.0);
         _ = c.bl_context_set_stroke_alpha(&self.context, 0.5);
         _ = c.bl_context_set_stroke_style_rgba32(&self.context, color);
-        _ = c.bl_context_stroke_path_d(&self.context, &origin,&path);
+        _ = c.bl_context_stroke_path_d(&self.context, &origin, &path);
     }
 
     pub fn saveImage(self: *Renderer) void {
