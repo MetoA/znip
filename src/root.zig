@@ -1,13 +1,16 @@
 const std = @import("std");
 const tree_sitter = @import("core/tree_sitter.zig");
-const ui_renderer = @import("ui/renderer.zig");
+const Config = @import("core/config.zig").Config;
+const Renderer = @import("ui/renderer.zig").Renderer;
 
 pub fn renderImage(source_code: [:0]const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+    
+    const config = try Config.init();
 
-    var renderer = try ui_renderer.Renderer.init(allocator);
+    var renderer = try Renderer.init(allocator, config);
     defer renderer.deinit();
 
     var parser = tree_sitter.Parser.init(allocator, source_code);
@@ -26,7 +29,7 @@ pub fn renderImage(source_code: [:0]const u8) !void {
     std.log.debug("inited img", .{});
     renderer.fillBackground();
     std.log.debug("filled bg", .{});
-    renderer.drawCodeWindow();
+    renderer.drawCodeWindow(last_chunk_height);
     std.log.debug("drawn code window", .{});
     renderer.drawCodeWindowControls();
     std.log.debug("drawn code window controls", .{});

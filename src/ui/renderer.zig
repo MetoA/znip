@@ -1,9 +1,10 @@
 const std = @import("std");
 const tree_sitter = @import("../core/tree_sitter.zig");
-const split_inclusive_iterator = @import("../util/split_inclusive_iterator.zig");
+const SplitInclusiveIterator = @import("../util/split_inclusive_iterator.zig").SplitInclusiveIterator;
 const fonts = @import("../assets/fonts/fonts.zig");
-const theme = @import("theme.zig");
+const Theme = @import("theme.zig").Theme;
 const themes = @import("themes.zig");
+const Config = @import("../core/config.zig").Config;
 const c = @cImport({
     @cInclude("blend2d/blend2d.h");
 });
@@ -15,17 +16,15 @@ pub const Renderer = struct {
     font: c.BLFontCore = undefined,
     font_data: c.BLFontDataCore = undefined,
     glyph_buffer: c.BLGlyphBufferCore = undefined,
-    active_theme: theme.Theme,
-    code_window_options: CodeWindowOptions,
+    config: Config = undefined,
     allocator: std.mem.Allocator,
 
     starting_whitespace: []const u8 = "",
 
-    pub fn init(allocator: std.mem.Allocator) !Renderer {
+    pub fn init(allocator: std.mem.Allocator, config: Config) !Renderer {
         var self: Renderer = undefined;
         self.allocator = allocator;
-
-        const font_size = 16.0; // TODO
+        self.config = config;
 
         _ = c.bl_font_face_init(&self.face);
         errdefer _ = c.bl_font_face_reset(&self.face);
@@ -45,21 +44,8 @@ pub const Renderer = struct {
         }
 
         _ = c.bl_font_init(&self.font);
-        _ = c.bl_font_create_from_face(&self.font, &self.face, font_size);
+        _ = c.bl_font_create_from_face(&self.font, &self.face, self.config.font_size);
         errdefer _ = c.bl_font_reset(&self.font);
-
-        // TODO
-        self.active_theme = themes.PaperWhite;
-
-        self.code_window_options = .{
-            .x = 50.0,
-            .y = 50.0,
-            .margin_x = 50.0,
-            .margin_y = 50.0,
-            .width = 700.0,
-            .height = 400.0,
-            .radius = 12.0,
-        };
 
         return self;
     }
@@ -74,7 +60,7 @@ pub const Renderer = struct {
         self.allocator.free(self.starting_whitespace);
     }
 
-    pub fn fontMetrics(self: *Renderer) FontMetrics {
+    fn fontMetrics(self: *Renderer) FontMetrics {
         var font_metrics: c.BLFontMetrics = undefined;
         _ = c.bl_font_get_metrics(&self.font, &font_metrics);
 
@@ -87,21 +73,20 @@ pub const Renderer = struct {
             .descent = descent,
             .line_height = ascent + descent + font_metrics.line_gap,
             .char_width = char_width,
-            .indentation_padding = char_width * 4,
-            .margin_x = 100.0,
-            .margin_y = 100.0,
+            .margin_x = self.config.code_window_options.codeStartX(),
+            .margin_y = self.config.code_window_options.codeStartY(),
         };
     }
 
     pub fn prepareDrawableChunks(self: *Renderer, tokens: []const tree_sitter.Token) !std.ArrayList(DrawableChunk) {
         const font_metrics = self.fontMetrics();
         var drawableChunks = std.ArrayList(DrawableChunk).empty;
-        var pen = Pen.init(55.0, font_metrics.margin_x, font_metrics.margin_y + font_metrics.ascent, font_metrics.line_height);
+        var pen = Pen.init(self.config.code_window_options.lineNumberX(), font_metrics.margin_x, font_metrics.margin_y + font_metrics.ascent, font_metrics.line_height);
 
         try drawableChunks.append(self.allocator, .{
             .x = pen.x,
             .y = pen.y,
-            .color = self.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
+            .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
             .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
         });
         pen.positionAtTextStart();
@@ -118,7 +103,7 @@ pub const Renderer = struct {
                     try drawableChunks.append(self.allocator, .{
                         .x = pen.x,
                         .y = pen.y,
-                        .color = self.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
+                        .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
                         .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
                     });
                     pen.positionAtTextStart();
@@ -127,13 +112,19 @@ pub const Renderer = struct {
                 first_part = false;
 
                 if (chunk.len > 0) {
-                    var wordsIterator = split_inclusive_iterator.SplitInclusiveIterator{ .buffer = chunk, .delimiter = " ", .index = 0 };
+                    var wordsIterator = SplitInclusiveIterator{ .buffer = chunk, .delimiter = " ", .index = 0 };
                     while (wordsIterator.next()) |word| {
                         var text_metrics: c.BLTextMetrics = undefined;
                         self.calculateTextMetrics(&text_metrics, word);
 
                         // max screen width, TODO
                         if (pen.x + text_metrics.advance.x + font_metrics.char_width > 700.0) {
+                            try drawableChunks.append(self.allocator, .{
+                                .type = ChunkType.wrap_indicator,
+                                .x = pen.x + 5.0,
+                                .y = pen.y,
+                                .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
+                            });
                             pen.nextLineIndentation();
                             pen.positionAtTextStart();
 
@@ -141,17 +132,23 @@ pub const Renderer = struct {
                             try drawableChunks.append(self.allocator, .{
                                 .x = pen.x,
                                 .y = pen.y,
-                                .color = self.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
+                                .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
                                 .text = self.starting_whitespace,
                             });
-                            pen.advanceX(text_metrics.advance.x + font_metrics.indentation_padding);
+                            try drawableChunks.append(self.allocator, .{
+                                .type = ChunkType.line_continuation,
+                                .x = pen.x,
+                                .y = pen.y,
+                                .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
+                            });
+                            pen.advanceX(text_metrics.advance.x);
                         }
 
                         self.calculateTextMetrics(&text_metrics, word);
                         try drawableChunks.append(self.allocator, .{
                             .x = pen.x,
                             .y = pen.y,
-                            .color = self.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
+                            .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
                             .text = word,
                         });
                         pen.advanceX(text_metrics.advance.x);
@@ -165,52 +162,111 @@ pub const Renderer = struct {
 
     pub fn drawChunks(self: *Renderer, chunks: []DrawableChunk) void {
         for (chunks) |chunk| {
-            _ = c.bl_context_set_fill_style_rgba32(&self.context, chunk.color);
-            _ = c.bl_context_fill_utf8_text_d(&self.context, &c.BLPoint{ .x = chunk.x, .y = chunk.y }, &self.font, chunk.text.ptr, chunk.text.len);
+            switch (chunk.type) {
+                .text => {
+                    _ = c.bl_context_set_fill_style_rgba32(&self.context, chunk.color);
+                    _ = c.bl_context_fill_utf8_text_d(&self.context, &c.BLPoint{ .x = chunk.x, .y = chunk.y }, &self.font, chunk.text.ptr, chunk.text.len);
+                },
+                .wrap_indicator => {
+                    try self.drawWrapStartArrow(chunk.x, chunk.y, chunk.color);
+                },
+                .line_continuation => {
+                    try self.drawLineContinuationArrow(chunk.x, chunk.y, chunk.color);
+                }
+            }
         }
     }
 
-    pub fn calculateTextMetrics(self: *Renderer, text_metrics: *c.BLTextMetrics, text: []const u8) void {
+    fn calculateTextMetrics(self: *Renderer, text_metrics: *c.BLTextMetrics, text: []const u8) void {
         _ = c.bl_glyph_buffer_set_text(&self.glyph_buffer, text.ptr, text.len, c.BL_TEXT_ENCODING_UTF8);
         _ = c.bl_font_shape(&self.font, &self.glyph_buffer);
         _ = c.bl_font_get_text_metrics(&self.font, &self.glyph_buffer, text_metrics);
     }
 
     pub fn initImage(self: *Renderer, last_line_y: f64) void {
-        const width = @as(i32, @intFromFloat(self.code_window_options.width + 2 * self.code_window_options.margin_x));
-        const height = @as(i32, @intFromFloat(self.code_window_options.heightFromLastY(last_line_y) + 2 * self.code_window_options.margin_y));
+        const width = @as(i32, @intFromFloat(self.config.code_window_options.max_width + 2 * self.config.code_window_options.x()));
+        const height = @as(i32, @intFromFloat(self.config.code_window_options.heightFromLastY(last_line_y) + 2 * self.config.code_window_options.y()));
         _ = c.bl_image_init_as(&self.image, width, height, c.BL_FORMAT_PRGB32);
         _ = c.bl_context_init_as(&self.context, &self.image, null);
     }
 
     pub fn fillBackground(self: *Renderer) void {
-        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.background);
+        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.config.active_theme.ui.background);
         _ = c.bl_context_fill_all(&self.context);
     }
 
-    pub fn drawCodeWindow(self: *Renderer) void {
+    pub fn drawCodeWindow(self: *Renderer, last_line_y: f64) void {
         const rect = c.BLRoundRect{
-            .x = self.code_window_options.x,
-            .y = self.code_window_options.y,
-            .w = self.code_window_options.width,
-            .h = self.code_window_options.height,
-            .rx = self.code_window_options.radius,
-            .ry = self.code_window_options.radius,
+            .x = self.config.code_window_options.x(),
+            .y = self.config.code_window_options.y(),
+            .w = self.config.code_window_options.max_width,
+            .h = self.config.code_window_options.heightFromLastY(last_line_y),
+            .rx = self.config.code_window_options.radius,
+            .ry = self.config.code_window_options.radius,
         };
-        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.code_window_background);
+        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.config.active_theme.ui.code_window_background);
         _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_ROUND_RECT, &rect);
     }
 
     pub fn drawCodeWindowControls(self: *Renderer) void {
         const colors = [_]u32{ 0xFFFF5F56, 0xFFFFBD2E, 0xFF27C93F };
         for (colors, 0..) |color, index| {
-            const center_x = @as(f64, @floatFromInt(75 + (index * 20)));
-            const center_y = @as(f64, @floatFromInt(75));
+            const center_x = self.config.code_window_options.windowControlsX() + @as(f64, @floatFromInt(index * 20));
+            const center_y = self.config.code_window_options.windowControlsY();
             const radius = @as(f64, @floatFromInt(6));
             const circle = c.BLCircle{ .cx = center_x, .cy = center_y, .r = radius };
             _ = c.bl_context_set_fill_style_rgba32(&self.context, color);
             _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_CIRCLE, &circle);
         }
+    }
+
+    // Curved arrow, drawn at the end of the line, indicating wrapping will appear
+    fn drawWrapStartArrow(self: *Renderer, x: f64, y: f64, color: u32) !void {
+        const origin = c.BLPoint{ .x = 0, .y = 0 };
+        const size: f64 = 8.0;
+        const offset_y: f64 = 2.0;
+        
+        var path: c.BLPathCore = undefined;
+        _ = c.bl_path_init(&path);
+        defer _ = c.bl_path_reset(&path);
+        
+        _ = c.bl_path_move_to(&path, x + size, y - (size * 1.2) - offset_y);
+        _ = c.bl_path_line_to(&path, x + size, y - offset_y);
+        _ = c.bl_path_line_to(&path, x, y - offset_y);
+        _ = c.bl_path_line_to(&path, x + (size * 0.3), y - (size * 0.3) - offset_y);
+        _ = c.bl_path_move_to(&path, x, y - offset_y);
+        _ = c.bl_path_line_to(&path, x + (size * 0.3), y + (size * 0.3) - offset_y);
+
+        _ = c.bl_context_set_stroke_width(&self.context, 1.0);
+        _ = c.bl_context_set_stroke_caps(&self.context, c.BL_STROKE_CAP_ROUND);
+        _ = c.bl_context_set_stroke_alpha(&self.context, 0.5);
+        _ = c.bl_context_set_stroke_style_rgba32(&self.context, color);
+        _ = c.bl_context_stroke_path_d(&self.context, &origin, &path);
+    }
+
+    // Straight arrow, drawn at the start of a new line, after wrapping text
+    fn drawLineContinuationArrow(self: *Renderer, x: f64, y: f64, color: u32) !void {
+        const size: f64 = 8.0;
+        const origin = c.BLPoint{ .x = 0, .y = 0 };
+        const metrics = self.fontMetrics();
+        // Center the arrow by moving it back a bit
+        const y_with_offset = y - (metrics.line_height / 4.0);
+        
+        var path: c.BLPathCore = undefined;
+        _ = c.bl_path_init(&path);
+        defer _ = c.bl_path_reset(&path);
+
+        _ = c.bl_path_move_to(&path, x, y_with_offset);
+        _ = c.bl_path_line_to(&path, x + size, y_with_offset);
+        _ = c.bl_path_line_to(&path, x + (size * 0.6), y_with_offset - (size * 0.4));
+        _ = c.bl_path_move_to(&path, x + size, y_with_offset);
+        _ = c.bl_path_line_to(&path, x + (size * 0.6), y_with_offset + (size * 0.4));
+
+
+        _ = c.bl_context_set_stroke_width(&self.context, 1.0);
+        _ = c.bl_context_set_stroke_alpha(&self.context, 0.5);
+        _ = c.bl_context_set_stroke_style_rgba32(&self.context, color);
+        _ = c.bl_context_stroke_path_d(&self.context, &origin,&path);
     }
 
     pub fn saveImage(self: *Renderer) void {
@@ -227,16 +283,22 @@ const FontMetrics = struct {
     descent: f32,
     line_height: f32,
     char_width: f32,
-    indentation_padding: f64,
     margin_x: f32,
     margin_y: f32,
 };
 
+const ChunkType = enum {
+    text,
+    wrap_indicator,
+    line_continuation,
+};
+
 const DrawableChunk = struct {
+    type: ChunkType = ChunkType.text,
     x: f64,
     y: f64,
-    color: u32, // Hex, e.g. 0xFF6272A4
-    text: []const u8,
+    color: u32 = 0, // Hex, e.g. 0xFF6272A4
+    text: []const u8 = "",
 };
 
 // TODO might be better to remove the line logic? and starting positions? just to separate stuff
@@ -282,20 +344,5 @@ const Pen = struct {
 
     pub fn positionAtNumStart(self: *Pen) void {
         self.x = self.num_starting_x;
-    }
-};
-
-const CodeWindowOptions = struct {
-    x: f64,
-    y: f64,
-    margin_x: f64,
-    margin_y: f64,
-    width: f64,
-    height: f64,
-    radius: f64,
-
-    pub fn heightFromLastY(self: *CodeWindowOptions, last_y: f64) f64 {
-        const padding_bottom = 25.0;
-        return last_y + padding_bottom - self.margin_y;
     }
 };
