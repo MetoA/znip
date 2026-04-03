@@ -83,6 +83,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const clap = b.dependency("clap", .{ .target = target, .optimize = optimize });
+    exe.root_module.addImport("clap", clap.module("clap"));
+
     exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/include/blend2d" });
     exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
 
