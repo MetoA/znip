@@ -77,6 +77,12 @@ pub const Renderer = struct {
     pub fn prepareDrawableChunks(self: *Renderer, tokens: []const tree_sitter.Token) !std.ArrayList(DrawableChunk) {
         const font_metrics = self.fontMetrics();
         var drawableChunks = std.ArrayList(DrawableChunk).empty;
+        errdefer {
+            for (drawableChunks.items) |d| {
+                self.allocator.free(d.text);
+            }
+            drawableChunks.deinit(self.allocator);
+        }
         var pen = Pen.init(self.config.code_window_options.lineNumberX(), font_metrics.margin_x, font_metrics.margin_y + font_metrics.ascent, font_metrics.line_height);
 
         try drawableChunks.append(self.allocator, .{
@@ -97,6 +103,7 @@ pub const Renderer = struct {
                 if (!first_part) {
                     if (starting_whitespace) |ws| {
                         self.allocator.free(ws);
+                        starting_whitespace = null;
                     }
                     starting_whitespace = try self.allocator.dupe(u8, chunk);
                     pen.nextLine();
@@ -152,7 +159,7 @@ pub const Renderer = struct {
                             .x = pen.x,
                             .y = pen.y,
                             .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
-                            .text = word,
+                            .text = try self.allocator.dupe(u8, word),
                         });
                         pen.advanceX(text_metrics.advance.x);
                     }

@@ -80,6 +80,12 @@ pub const Parser = struct {
         c.ts_query_cursor_exec(cursor, query, root_node);
 
         var matches = std.ArrayList(Match).empty;
+        errdefer {
+            for (matches.items) |m| {
+                self.allocator.free(m.capture_name);
+            }
+            matches.deinit(self.allocator);
+        }
         var match: c.TSQueryMatch = undefined;
         while (c.ts_query_cursor_next_match(cursor, &match)) {
             for (0..match.capture_count) |i| {
@@ -91,7 +97,8 @@ pub const Parser = struct {
 
                 var name_len: u32 = 0;
                 const name_ptr = c.ts_query_capture_name_for_id(query, capture.index, &name_len);
-                const capture_name = name_ptr[0..name_len]; // @variable, @type, @constant...
+                const capture_name = try self.allocator.dupe(u8, name_ptr[0..name_len]); // @variable, @type, @constant...
+                errdefer self.allocator.free(capture_name);
                 const text = self.source_code[start_byte..end_byte]; // main, pub, (), {}...
 
                 std.log.debug("Found '{s}' at {d}:{d} -> Type: @{s}", .{ text, start_byte, end_byte, capture_name });
@@ -115,6 +122,13 @@ pub const Parser = struct {
 
     pub fn sourceCodeTokens(self: *Parser, matches: std.ArrayList(Match)) !std.ArrayList(Token) {
         var tokens = std.ArrayList(Token).empty;
+        errdefer {
+            for (tokens.items) |t| {
+                self.allocator.free(t.text);
+                self.allocator.free(t.capture_name);
+            }
+            tokens.deinit(self.allocator);
+        }
         var current_byte: usize = 0;
 
         for (matches.items) |match| {
@@ -123,7 +137,7 @@ pub const Parser = struct {
 
             // Next match skips a byte, it is a white space, tab, newline...
             if (match.start_byte > current_byte) {
-                const gap_text = self.source_code[current_byte..match.start_byte];
+                const gap_text = try self.allocator.dupe(u8, self.source_code[current_byte..match.start_byte]);
                 const is_newline = std.mem.eql(u8, gap_text, "\n");
                 try tokens.append(self.allocator, .{
                     .text = gap_text,
@@ -133,7 +147,7 @@ pub const Parser = struct {
             }
 
             try tokens.append(self.allocator, .{
-                .text = self.source_code[match.start_byte..match.end_byte],
+                .text = try self.allocator.dupe(u8, self.source_code[match.start_byte..match.end_byte]),
                 .capture_name = match.capture_name,
                 .is_newline = false,
             });
@@ -143,10 +157,10 @@ pub const Parser = struct {
 
         // Leftover bytes after last match
         if (current_byte < self.source_code.len) {
-            const gap_text = self.source_code[current_byte..];
+            const gap_text = try self.allocator.dupe(u8, self.source_code[current_byte..]);
             const is_newline = std.mem.eql(u8, gap_text, "\n");
             try tokens.append(self.allocator, .{
-                .text = self.source_code[current_byte..],
+                .text = try self.allocator.dupe(u8, self.source_code[current_byte..]),
                 .capture_name = "",
                 .is_newline = is_newline,
             });
