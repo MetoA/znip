@@ -126,7 +126,7 @@ pub const Renderer = struct {
                         self.calculateTextMetrics(&text_metrics, word);
 
                         // max screen width, TODO
-                        if (pen.x + text_metrics.advance.x + font_metrics.char_width > 700.0) {
+                        if (pen.x + text_metrics.advance.x + font_metrics.char_width > 720.0) {
                             try drawableChunks.append(self.allocator, .{
                                 .type = ChunkType.wrap_indicator,
                                 .x = pen.x + 5.0,

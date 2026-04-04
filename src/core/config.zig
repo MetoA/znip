@@ -62,7 +62,7 @@ pub const Config = struct {
     active_theme: Theme = themes.PaperWhite,
 
     pub fn init() !Config {
-        // TODO load from file?
+        // TODO load from file? and have default
         return .{};
     }
 };

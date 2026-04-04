@@ -10,10 +10,17 @@ pub fn getLinesInRange(
     defer file.close();
     
     const max_bytes = 10 * 1024 * 1024; // 10MB
+    const stat = try file.stat();
+    
+    if (stat.size > max_bytes) return error.FileTooLarge;
     const content = try file.readToEndAlloc(allocator, max_bytes);
-    defer allocator.free(content);
+    errdefer allocator.free(content);
     
     if (isBinary(content)) return error.BinaryFileNotSupported;
+    
+    if (starting_line == null and ending_line == null) {
+        return allocator.dupeZ(u8, content);
+    }
     
     var lines = std.ArrayList([]const u8).empty;
     defer lines.deinit(allocator);
@@ -32,7 +39,10 @@ pub fn getLinesInRange(
     
     if (start_index >= total or start_index >= end_index) return error.InvalidRange;
     
-    return try std.mem.joinZ(allocator, "\n", lines.items[start_index..end_index]);
+    const result = try std.mem.joinZ(allocator, "\n", lines.items[start_index..end_index]);
+    
+    allocator.free(content);
+    return result;
 }
 
 // Null bytes indicate binary

@@ -12,15 +12,15 @@ pub fn main() !void {
     var cli_config = cli.parse(allocator) catch |err| switch (err) {
         error.InvalidStartEndLines => {
             std.log.err("Invalid Start and end lines", .{});
-            std.process.exit(1);
+            return;
         },
         error.MultipleCodeSourcesNotSupported => {
             std.log.err("Multiple code sources not supported", .{});
-            std.process.exit(1);
+            return;
         },
         else => {
             std.log.err("Error {}", .{err});
-            std.process.exit(1);
+            return;
         },
     };
     defer cli_config.deinit(allocator);
@@ -65,7 +65,7 @@ pub fn main() !void {
     if (cli_config.from_clipboard) {
         code = clipboard.read(allocator) catch {
             std.log.err("CLIPBOARD READ ERR", .{});
-            std.process.exit(1);
+            return;
         };
     }
     

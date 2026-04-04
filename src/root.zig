@@ -17,20 +17,10 @@ pub fn renderImage(source_code: [:0]const u8) !void {
 
     var matches = try parser.sourceCodeMatches();
     defer matches.deinit(allocator);
-    defer for (matches.items) |match| {
-        allocator.free(match.capture_name);
-    };
     var tokens = try parser.sourceCodeTokens(matches);
     defer tokens.deinit(allocator);
-    defer for (tokens.items) |token| {
-        allocator.free(token.capture_name);
-        allocator.free(token.text);
-    };
     var chunks = try renderer.prepareDrawableChunks(tokens.items);
     defer chunks.deinit(allocator);
-    defer for (chunks.items) |chunk| {
-        allocator.free(chunk.text);
-    };
     const last_chunk_height: f64 = if (chunks.items.len > 0) chunks.getLast().y else 300.0;
     renderer.initImage(last_chunk_height);
     renderer.fillBackground();
