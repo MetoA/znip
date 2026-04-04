@@ -2,6 +2,7 @@ const std = @import("std");
 const znip = @import("znip");
 const cli = @import("core/cli.zig");
 const util_files = @import("util/files.zig");
+const clipboard = @import("clipboard/clipboard.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -60,6 +61,14 @@ pub fn main() !void {
             },
         };
     }
+    
+    if (cli_config.from_clipboard) {
+        code = clipboard.read(allocator) catch {
+            std.log.err("CLIPBOARD READ ERR", .{});
+            std.process.exit(1);
+        };
+    }
+    
 
     defer if (code) |c| allocator.free(c);
 

@@ -19,8 +19,6 @@ pub const Renderer = struct {
     config: Config = undefined,
     allocator: std.mem.Allocator,
 
-    starting_whitespace: []const u8 = "",
-
     pub fn init(allocator: std.mem.Allocator, config: Config) !Renderer {
         var self: Renderer = undefined;
         self.allocator = allocator;
@@ -56,8 +54,6 @@ pub const Renderer = struct {
         _ = c.bl_glyph_buffer_reset(&self.glyph_buffer);
         _ = c.bl_image_reset(&self.image);
         _ = c.bl_context_reset(&self.context);
-
-        self.allocator.free(self.starting_whitespace);
     }
 
     fn fontMetrics(self: *Renderer) FontMetrics {
@@ -90,6 +86,8 @@ pub const Renderer = struct {
             .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
         });
         pen.positionAtTextStart();
+        var starting_whitespace: ?[]const u8 = null;
+        defer if (starting_whitespace) |ws| self.allocator.free(ws);
 
         for (tokens) |token| {
             var iterator = std.mem.splitScalar(u8, token.text, '\n');
@@ -97,7 +95,10 @@ pub const Renderer = struct {
             while (iterator.next()) |chunk| {
                 // Mostly helps with new lines
                 if (!first_part) {
-                    self.starting_whitespace = chunk;
+                    if (starting_whitespace) |ws| {
+                        self.allocator.free(ws);
+                    }
+                    starting_whitespace = try self.allocator.dupe(u8, chunk);
                     pen.nextLine();
                     pen.positionAtNumStart();
                     try drawableChunks.append(self.allocator, .{
@@ -128,13 +129,15 @@ pub const Renderer = struct {
                             pen.nextLineIndentation();
                             pen.positionAtTextStart();
 
-                            self.calculateTextMetrics(&text_metrics, self.starting_whitespace);
-                            try drawableChunks.append(self.allocator, .{
-                                .x = pen.x,
-                                .y = pen.y,
-                                .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
-                                .text = self.starting_whitespace,
-                            });
+                            if (starting_whitespace) |sw| {
+                                self.calculateTextMetrics(&text_metrics, sw);
+                                try drawableChunks.append(self.allocator, .{
+                                    .x = pen.x,
+                                    .y = pen.y,
+                                    .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
+                                    .text = try self.allocator.dupe(u8, sw),
+                                });
+                            }
                             try drawableChunks.append(self.allocator, .{
                                 .type = ChunkType.line_continuation,
                                 .x = pen.x,
