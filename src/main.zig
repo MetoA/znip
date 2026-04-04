@@ -1,29 +1,29 @@
 const std = @import("std");
 const znip = @import("znip");
 const cli = @import("core/cli.zig");
+const util_files = @import("util/files.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // TODO fetch from file/command
-    const code =
-        \\pub fn main() !void {
-        \\  std.debug.print("MATCH: start_byte={} end_byte={} tag={s}\n something else", .{ match.start_byte, match.end_byte, match.tag });
-        \\  {
-        \\      std.debug.print("Hello one two three something long", .{});
-        \\  }
-        \\}
-    ;
-    
-    _ = code;
-    
-    var cli_config = cli.parse(allocator) catch {
-        std.process.exit(1);
+    var cli_config = cli.parse(allocator) catch |err| switch (err) {
+        error.InvalidStartEndLines => {
+            std.log.err("Invalid Start and end lines", .{});
+            std.process.exit(1);
+        },
+        error.MultipleCodeSourcesNotSupported => {
+            std.log.err("Multiple code sources not supported", .{});
+            std.process.exit(1);
+        },
+        else => {
+            std.log.err("Error {}", .{err});
+            std.process.exit(1);
+        },
     };
     defer cli_config.deinit(allocator);
-    
+
     std.log.debug("----- CLI CONFIG ----", .{});
     std.log.debug("Help {}", .{cli_config.help});
     std.log.debug("File Name {s}", .{cli_config.file_path orelse "none"});
@@ -33,5 +33,42 @@ pub fn main() !void {
     std.log.debug("To Clipboard {}", .{cli_config.to_clipboard});
     std.log.debug("Interactive {}", .{cli_config.interactive});
 
-    // try znip.renderImage(code);
+    if (cli_config.help) {
+        try cli.help();
+        return;
+    }
+
+    var code: ?[:0]u8 = null;
+
+    if (cli_config.file_path) |file_path| {
+        code = util_files.getLinesInRange(allocator, file_path, cli_config.starting_line, cli_config.ending_line) catch |err| switch (err) {
+            error.BinaryFileNotSupported => {
+                std.log.err("BINARY FILE NOT SUPPORTED", .{});
+                return;
+            },
+            error.EmptyFileNotSupported => {
+                std.log.err("EMPTY FILE NOT SUPPORTED", .{});
+                return;
+            },
+            error.InvalidRange => {
+                std.log.err("INVALID RANGE", .{});
+                return;
+            },
+            else => {
+                std.log.err("OTHER ERROR", .{});
+                return err;
+            },
+        };
+    }
+
+    defer if (code) |c| allocator.free(c);
+
+    if (code == null) {
+        std.log.err("NO CODE PROVIDED", .{});
+        return;
+    }
+
+    if (code) |c| {
+        try znip.renderImage(c);
+    }
 }

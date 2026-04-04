@@ -22,7 +22,7 @@ pub const params = clap.parseParamsComptime(
     \\    --from-clipboard Uses the text available in your clipboard
     \\    --to-clipboard   Copies the generated image to your clipboard
     \\-i, --interactive    Initiates an interactive step by step process of selecting various configurations
-    \\<str>
+    \\<str>                The file path of the code that would be used
 );
 
 pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
@@ -39,7 +39,7 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     const raw_path = if (result.positionals.len > 0) result.positionals[0] else null;
     const file_path = if (raw_path) |p| try allocator.dupe(u8, p) else null;
 
-    return CLIConfig{
+    const cli_config = CLIConfig{
         .help = result.args.help != 0,
         .file_path = file_path,
         .starting_line = result.args.start,
@@ -48,4 +48,22 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
         .to_clipboard = result.args.@"to-clipboard" != 0,
         .interactive = result.args.interactive != 0,
     };
+    
+    if (cli_config.starting_line) |starting_line| {
+        if (cli_config.ending_line) |ending_line| {
+            if (starting_line >= ending_line) {
+                return error.InvalidStartEndLines;
+            }
+        }
+    }
+    
+    if (cli_config.file_path != null and cli_config.from_clipboard) {
+        return error.MultipleCodeSourcesNotSupported;
+    }
+    
+    return cli_config;
+}
+
+pub fn help() !void {
+    return try clap.helpToFile(.stderr(), clap.Help, &params, .{});
 }
