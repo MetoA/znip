@@ -36,32 +36,41 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     };
     defer result.deinit();
 
+    // Help early
+    if (result.args.help != 0) return CLIConfig{ .help = true };
+
     const raw_path = if (result.positionals.len > 0) result.positionals[0] else null;
     const file_path = if (raw_path) |p| try allocator.dupe(u8, p) else null;
+    errdefer if (file_path) |fp| allocator.free(fp);
 
-    const cli_config = CLIConfig{
-        .help = result.args.help != 0,
+    const from_clipboard = result.args.@"from-clipboard" != 0; 
+    if (file_path != null and from_clipboard) {
+        return error.MultipleCodeSourcesNotSupported;
+    }
+
+    if (file_path == null and !from_clipboard) {
+        return error.NoInputProvided;
+    }
+
+    const start: ?usize = result.args.start;
+    const end: ?usize = result.args.end;
+    if (start) |s| if (s == 0) return error.InvalidStartLine;
+    if (end) |e| if (e == 0) return error.InvalidEndLine;
+    if (start) |s| {
+        if (end) |e| {
+            if (s >= e) return error.InvalidStartEndLines;
+        }
+    }
+
+    return CLIConfig{
+        .help = false,
         .file_path = file_path,
-        .starting_line = result.args.start,
-        .ending_line = result.args.end,
-        .from_clipboard = result.args.@"from-clipboard" != 0,
+        .starting_line = start,
+        .ending_line = end,
+        .from_clipboard = from_clipboard,
         .to_clipboard = result.args.@"to-clipboard" != 0,
         .interactive = result.args.interactive != 0,
     };
-    
-    if (cli_config.starting_line) |starting_line| {
-        if (cli_config.ending_line) |ending_line| {
-            if (starting_line >= ending_line) {
-                return error.InvalidStartEndLines;
-            }
-        }
-    }
-    
-    if (cli_config.file_path != null and cli_config.from_clipboard) {
-        return error.MultipleCodeSourcesNotSupported;
-    }
-    
-    return cli_config;
 }
 
 pub fn help() !void {
