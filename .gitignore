@@ -4,5 +4,5 @@ zig-out/
 *.iml
 .idea
 
-# Ignore the test output file
-output.png
+# Ignore the test output files
+znip_output_*.png

@@ -77,7 +77,19 @@ pub fn main() !void {
         return;
     }
 
+    var generated_file_path: ?[]const u8 = null;
+    defer if (generated_file_path) |fp| allocator.free(fp);
     if (code) |c| {
-        try znip.renderImage(c);
+        generated_file_path = try znip.renderImage(allocator, c);
+    }
+    
+    if (cli_config.to_clipboard) {
+        if (generated_file_path) |fp| {
+            const content = try util_files.readFile(allocator, fp);
+            defer allocator.free(content);
+            try clipboard.write_image(content);
+        } else {
+            // TODO some log?
+        }
     }
 }

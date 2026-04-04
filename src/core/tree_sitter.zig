@@ -99,9 +99,9 @@ pub const Parser = struct {
                 const name_ptr = c.ts_query_capture_name_for_id(query, capture.index, &name_len);
                 const capture_name = try self.allocator.dupe(u8, name_ptr[0..name_len]); // @variable, @type, @constant...
                 errdefer self.allocator.free(capture_name);
-                const text = self.source_code[start_byte..end_byte]; // main, pub, (), {}...
+                // const text = self.source_code[start_byte..end_byte]; // main, pub, (), {}...
 
-                std.log.debug("Found '{s}' at {d}:{d} -> Type: @{s}", .{ text, start_byte, end_byte, capture_name });
+                // std.log.debug("Found '{s}' at {d}:{d} -> Type: @{s}", .{ text, start_byte, end_byte, capture_name });
 
                 // Skips same match that has multiple tags, e.g. "mainmainmain"
                 if (matches.items.len > 0) {

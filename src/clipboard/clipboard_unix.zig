@@ -7,16 +7,16 @@ const xclip: []const u8 = "xclip";
 const wlpaste: []const u8 = "wl-paste";
 const wlcopy: []const u8 = "wl-copy";
 
-const xsel_write = [_][]const u8{ xsel, "--input", "--clipboard" };
 const xsel_read = [_][]const u8{ xsel, "--output", "--clipboard" };
-const xclip_write = [_][]const u8{ xclip, "-in", "-selection", "clipboard" };
 const xclip_read = [_][]const u8{ xclip, "-out", "-selection", "clipboard" };
 const wlpaste_read = [_][]const u8{ wlpaste, "--no-newline" };
-const wlcopy_write = [_][]const u8{wlcopy};
+const xsel_write_image = [_][]const u8{ xsel, "--input", "--clipboard", "--attachment", "image/png" };
+const xclip_write_image = [_][]const u8{ xclip, "-in", "-selection", "clipboard", "-t", "image/png" };
+const wlcopy_write_image = [_][]const u8{ wlcopy, "--type", "image/png" };
 
-const op = enum {
+const Operation = enum {
     read,
-    write,
+    write_image,
 };
 
 fn canExecutePosix(path: []const u8) bool {
@@ -42,20 +42,20 @@ fn findProgramByNamePosix(name: []const u8, path: ?[]const u8, buf: []u8) ?[]con
     return null;
 }
 
-fn getCmd(t: op) ![]const []const u8 {
+fn getCmd(operation: Operation) ![]const []const u8 {
     const pathenv = std.process.getEnvVarOwned(std.heap.page_allocator, "PATH") catch "";
     const wd = std.process.getEnvVarOwned(std.heap.page_allocator, "XDG_SESSION_TYPE") catch "";
     if (std.mem.eql(u8, wd, "wayland")) {
-        return if (t == op.read) &wlpaste_read else &wlcopy_write;
+        return if (operation == Operation.read) &wlpaste_read else &wlcopy_write_image;
     }
     var buf: [255]u8 = undefined;
-    var p = findProgramByNamePosix(xclip, pathenv, &buf);
-    if (p != null) {
-        return if (t == op.read) &xclip_read else &xclip_write;
+    var program = findProgramByNamePosix(xclip, pathenv, &buf);
+    if (program != null) {
+        return if (operation == Operation.read) &xclip_read else &xclip_write_image;
     }
-    p = findProgramByNamePosix(xsel, pathenv, &buf);
-    if (p != null) {
-        return if (t == op.read) &xsel_read else &xsel_write;
+    program = findProgramByNamePosix(xsel, pathenv, &buf);
+    if (program != null) {
+        return if (operation == Operation.read) &xsel_read else &xsel_write_image;
     }
     return error.ClipboardCmdNotFound;
 }
@@ -67,4 +67,22 @@ pub fn read() ![]u8 {
         .argv = cmd,
     });
     return result.stdout;
+}
+
+pub fn write(png_bytes: []const u8) !void {
+    const cmd = try getCmd(.write_image);
+    var proc = std.process.Child.init(
+        cmd,
+        std.heap.page_allocator,
+    );
+    proc.stdin_behavior = .Pipe;
+    proc.stdout_behavior = .Ignore;
+    proc.stderr_behavior = .Ignore;
+
+    try proc.spawn();
+    try proc.stdin.?.writeAll(png_bytes);
+    proc.stdin.?.close();
+    proc.stdin = null;
+    const term = proc.wait() catch unreachable;
+    if (term != .Exited or term.Exited != 0) unreachable;
 }

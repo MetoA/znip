@@ -19,6 +19,7 @@ pub fn getLinesInRange(
     if (isBinary(content)) return error.BinaryFileNotSupported;
     
     if (starting_line == null and ending_line == null) {
+        defer allocator.free(content);
         return allocator.dupeZ(u8, content);
     }
     
@@ -52,4 +53,11 @@ fn isBinary(buffer: []const u8) bool {
         if (byte == 0) return true;
     }
     return false;
+}
+
+pub fn readFile(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
+    const file = try std.fs.cwd().openFile(file_path, .{});
+    defer file.close();
+    const stats = try file.stat();
+    return try file.readToEndAlloc(allocator, stats.size);
 }
