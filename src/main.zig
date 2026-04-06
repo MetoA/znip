@@ -61,14 +61,13 @@ pub fn main() !void {
             },
         };
     }
-    
+
     if (cli_config.from_clipboard) {
         code = clipboard.read(allocator) catch {
             std.log.err("CLIPBOARD READ ERR", .{});
             return;
         };
     }
-    
 
     defer if (code) |c| allocator.free(c);
 
@@ -77,19 +76,16 @@ pub fn main() !void {
         return;
     }
 
-    var generated_file_path: ?[]const u8 = null;
-    defer if (generated_file_path) |fp| allocator.free(fp);
-    if (code) |c| {
-        generated_file_path = try znip.renderImage(allocator, c);
-    }
+    const file_name = try std.fmt.allocPrint(allocator, "znip_output_{d}.png", .{ std.time.timestamp() });
+    defer allocator.free(file_name);
     
+    if (code) |c| {
+        try znip.renderImage(c, file_name);
+    }
+
     if (cli_config.to_clipboard) {
-        if (generated_file_path) |fp| {
-            const content = try util_files.readFile(allocator, fp);
+            const content = try util_files.readFile(allocator, file_name);
             defer allocator.free(content);
             try clipboard.write_image(content);
-        } else {
-            // TODO some log?
-        }
     }
 }

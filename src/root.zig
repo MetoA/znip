@@ -3,7 +3,7 @@ const tree_sitter = @import("core/tree_sitter.zig");
 const Config = @import("core/config.zig").Config;
 const Renderer = @import("ui/renderer.zig").Renderer;
 
-pub fn renderImage(allocator: std.mem.Allocator, source_code: [:0]const u8) ![]const u8 {
+pub fn renderImage(source_code: [:0]const u8, file_name: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
@@ -27,7 +27,5 @@ pub fn renderImage(allocator: std.mem.Allocator, source_code: [:0]const u8) ![]c
     try renderer.drawCodeWindow(last_chunk_height);
     renderer.drawCodeWindowControls();
     renderer.drawChunks(chunks.items);
-    const generated_path = try renderer.saveImage();
-    const final_path = try allocator.dupe(u8, generated_path);
-    return final_path;
+    renderer.saveImage(file_name);
 }
