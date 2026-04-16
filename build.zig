@@ -101,12 +101,16 @@ pub fn build(b: *std.Build) !void {
         try b2d_flags.append(b.allocator, "-mavx2");
         try b2d_flags.append(b.allocator, "-DBL_BUILD_OPT_AVX2");
         try b2d_flags.append(b.allocator, "-DBL_BUILD_OPT_SSE2");
-    } else if (target.result.cpu.arch.isArm() or target.result.cpu.arch.isAARCH64()) {
-        std.log.debug("arm or aarch64", .{});
+    } else if (target.result.cpu.arch.isAARCH64()) {
+        std.log.debug("aarch64", .{});
+    } else if (target.result.cpu.arch.isArm()) {
+        std.log.debug("arm", .{});
         try b2d_flags.append(b.allocator, "-mfpu=neon");
     }
     exe.addIncludePath(b.path("vendor/blend2d"));
     exe.addIncludePath(b.path("vendor/blend2d/3rdparty/asmjit"));
+    mod.addIncludePath(b.path("vendor/blend2d"));
+    mod.addIncludePath(b.path("vendor/blend2d/3rdparty/asmjit"));
     addSourceFilesFromDir(b, exe, "vendor/blend2d/blend2d", b2d_flags.items);
     addSourceFilesFromDir(b, exe, "vendor/blend2d/3rdparty/asmjit/asmjit", b2d_flags.items);
     
@@ -120,6 +124,8 @@ pub fn build(b: *std.Build) !void {
     };
     exe.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
     exe.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
+    mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
+    mod.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
     exe.addCSourceFile(.{
         .file = b.path("vendor/tree-sitter/lib/src/lib.c"),
         .flags = &ts_flags,
