@@ -6,7 +6,7 @@ const std = @import("std");
 // for defining build steps and express dependencies between them, allowing the
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     // Standard target options allow the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -86,13 +86,45 @@ pub fn build(b: *std.Build) void {
     const clap = b.dependency("clap", .{ .target = target, .optimize = optimize });
     exe.root_module.addImport("clap", clap.module("clap"));
 
-    exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/include/blend2d" });
-    exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
-
+    // Blend2D configuration
+    exe.linkLibCpp();
+    var b2d_flags = std.ArrayList([]const u8).empty;
+    try b2d_flags.appendSlice(b.allocator, &.{
+        "-std=c++17",
+        "-DBL_STATIC",
+        "-DASMJIT_STATIC",
+        "-fno-math-errno",
+    });
+    if (target.result.cpu.arch == .x86_64) {
+        std.log.debug("x86", .{});
+        try b2d_flags.append(b.allocator, "-msse4.2");
+        try b2d_flags.append(b.allocator, "-mavx2");
+        try b2d_flags.append(b.allocator, "-DBL_BUILD_OPT_AVX2");
+        try b2d_flags.append(b.allocator, "-DBL_BUILD_OPT_SSE2");
+    } else if (target.result.cpu.arch.isArm() or target.result.cpu.arch.isAARCH64()) {
+        std.log.debug("arm or aarch64", .{});
+        try b2d_flags.append(b.allocator, "-mfpu=neon");
+    }
+    exe.addIncludePath(b.path("vendor/blend2d"));
+    exe.addIncludePath(b.path("vendor/blend2d/3rdparty/asmjit"));
+    addSourceFilesFromDir(b, exe, "vendor/blend2d/blend2d", b2d_flags.items);
+    addSourceFilesFromDir(b, exe, "vendor/blend2d/3rdparty/asmjit/asmjit", b2d_flags.items);
+    
+    // Tree-sitter configuration
     exe.linkLibC();
-    exe.linkSystemLibrary("blend2d");
-    exe.linkSystemLibrary("tree-sitter");
-
+    const ts_flags = [_][]const u8{
+        "-std=c11",
+        "-D_GNU_SOURCE",             // Fixes le16toh/be16toh
+        "-D_POSIX_C_SOURCE=200112L", // Fixes fdopen
+        "-D_DEFAULT_SOURCE",         // General compatibility
+    };
+    exe.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
+    exe.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
+    exe.addCSourceFile(.{
+        .file = b.path("vendor/tree-sitter/lib/src/lib.c"),
+        .flags = &ts_flags,
+    });
+    
     const languages = [_][]const u8{ "zig", "rust", "javascript", "typescript", "python", "c", "cpp", "go", "html", "css", "java", "ruby", "php", "json", "markdown", "sql" };
 
     for (languages) |language| {
@@ -200,4 +232,29 @@ pub fn build(b: *std.Build) void {
 fn hasScanner(scanner: []u8) bool {
     _ = std.fs.cwd().access(scanner, .{}) catch return false;
     return true;
+}
+
+fn addSourceFilesFromDir(b: *std.Build, exe: *std.Build.Step.Compile, dir_path: []const u8, cpp_flags: []const []const u8) void {
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+
+    while (walker.next() catch null) |entry| {
+        const name = entry.basename;
+        const path = entry.path;
+
+        // 1. Only .cpp and .c
+        const ext = std.fs.path.extension(name);
+        if (!std.mem.eql(u8, ext, ".cpp") and !std.mem.eql(u8, ext, ".c")) continue;
+
+        // 2. Ignore tests/demos/samples
+        if (std.mem.containsAtLeast(u8, path, 1, "test") or
+            std.mem.containsAtLeast(u8, path, 1, "demo") or
+            std.mem.containsAtLeast(u8, path, 1, "sample")) continue;
+
+        const full_path = b.pathJoin(&.{ dir_path, path });
+        exe.addCSourceFile(.{ .file = b.path(full_path), .flags = cpp_flags });
+    }
 }
