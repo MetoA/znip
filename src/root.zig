@@ -3,7 +3,7 @@ const tree_sitter = @import("core/tree_sitter.zig");
 const Config = @import("core/config.zig").Config;
 const Renderer = @import("ui/renderer.zig").Renderer;
 
-pub fn renderImage(source_code: [:0]const u8, file_name: []const u8) !void {
+pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
@@ -13,7 +13,7 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8) !void {
     var renderer = try Renderer.init(arena_allocator, config);
     defer renderer.deinit();
 
-    var parser = tree_sitter.Parser.init(arena_allocator, source_code);
+    var parser = tree_sitter.Parser.init(arena_allocator, source_code, source_hint_path);
 
     var matches = try parser.sourceCodeMatches();
     defer matches.deinit(arena_allocator);

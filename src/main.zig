@@ -25,15 +25,6 @@ pub fn main() !void {
     };
     defer cli_config.deinit(allocator);
 
-    std.log.debug("----- CLI CONFIG ----", .{});
-    std.log.debug("Help {}", .{cli_config.help});
-    std.log.debug("File Name {s}", .{cli_config.file_path orelse "none"});
-    std.log.debug("Start {d}", .{cli_config.starting_line orelse 1});
-    std.log.debug("End {d}", .{cli_config.ending_line orelse 9999});
-    std.log.debug("From Clipboard {}", .{cli_config.from_clipboard});
-    std.log.debug("To Clipboard {}", .{cli_config.to_clipboard});
-    std.log.debug("Interactive {}", .{cli_config.interactive});
-
     if (cli_config.help) {
         try cli.help();
         return;
@@ -80,7 +71,7 @@ pub fn main() !void {
     defer allocator.free(file_name);
     
     if (code) |c| {
-        try znip.renderImage(c, file_name);
+        try znip.renderImage(c, file_name, cli_config.file_path);
     }
 
     if (cli_config.to_clipboard) {

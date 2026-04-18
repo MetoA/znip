@@ -15,6 +15,7 @@ extern fn tree_sitter_markdown() *c.TSLanguage;
 extern fn tree_sitter_php() *c.TSLanguage;
 extern fn tree_sitter_python() *c.TSLanguage;
 extern fn tree_sitter_ruby() *c.TSLanguage;
+extern fn tree_sitter_rust() *c.TSLanguage;
 extern fn tree_sitter_sql() *c.TSLanguage;
 extern fn tree_sitter_typescript() *c.TSLanguage;
 extern fn tree_sitter_zig() *c.TSLanguage;
@@ -38,27 +39,70 @@ const HighlightsQueryMap = struct {
     pub const zig = @embedFile("../deps/tree-sitter-zig/queries/highlights.scm");
 };
 
+const LanguageId = enum {
+    c,
+    cpp,
+    css,
+    go,
+    html,
+    java,
+    javascript,
+    json,
+    python,
+    ruby,
+    rust,
+    zig,
+};
+
+const all_languages = [_]LanguageId{
+    .zig,
+    .rust,
+    .javascript,
+    .python,
+    .c,
+    .cpp,
+    .go,
+    .html,
+    .css,
+    .java,
+    .ruby,
+    .json,
+};
+
+const TreeStats = struct {
+    total_nodes: u32 = 0,
+    named_nodes: u32 = 0,
+    error_nodes: u32 = 0,
+    missing_nodes: u32 = 0,
+    max_depth: u32 = 0,
+    has_error: bool = false,
+};
+
 pub const Parser = struct {
     source_code: []const u8,
     allocator: std.mem.Allocator,
+    source_hint_path: ?[]const u8,
 
-    pub fn init(allocator: std.mem.Allocator, source_code: [:0]const u8) Parser {
+    const max_detection_bytes = 16 * 1024;
+
+    pub fn init(allocator: std.mem.Allocator, source_code: [:0]const u8, source_hint_path: ?[]const u8) Parser {
         var self: Parser = undefined;
         self.allocator = allocator;
         self.source_code = source_code;
+        self.source_hint_path = source_hint_path;
 
         return self;
     }
 
     pub fn sourceCodeMatches(self: *Parser) !std.ArrayList(Match) {
-        // TODO Use the correct highlights query based on the language used
-        const query_source = HighlightsQueryMap.zig;
+        const detected_language = try self.detectLanguage();
+        const query_source = highlightsQuerySource(detected_language);
+        const lang = languagePtr(detected_language);
+        std.log.debug("Detected language: {s}", .{languageName(detected_language)});
 
         const parser = c.ts_parser_new() orelse return error.ParserInitFailed;
         defer c.ts_parser_delete(parser);
 
-        // TODO dynamically figure out the language
-        const lang = tree_sitter_zig();
         _ = c.ts_parser_set_language(parser, lang);
 
         const tree = c.ts_parser_parse_string(parser, null, self.source_code.ptr, @intCast(self.source_code.len)) orelse return error.ParseFailed;
@@ -118,6 +162,219 @@ pub const Parser = struct {
         }
 
         return matches;
+    }
+
+    fn detectLanguage(self: *Parser) !LanguageId {
+        const source = if (self.source_code.len > max_detection_bytes) self.source_code[0..max_detection_bytes] else self.source_code;
+        if (std.mem.trim(u8, source, " \t\r\n").len == 0) return .zig;
+
+        const extension_lang = if (self.source_hint_path) |hint| detectLanguageFromPath(hint) else null;
+        const fence_lang = detectLanguageFromFence(source);
+        const shebang_lang = detectLanguageFromShebang(source);
+
+        var candidates = std.ArrayList(LanguageId).empty;
+        defer candidates.deinit(self.allocator);
+
+        if (extension_lang) |lang| try appendCandidate(self.allocator, &candidates, lang);
+        if (fence_lang) |lang| try appendCandidate(self.allocator, &candidates, lang);
+        if (shebang_lang) |lang| try appendCandidate(self.allocator, &candidates, lang);
+        for (all_languages) |lang| {
+            try appendCandidate(self.allocator, &candidates, lang);
+        }
+
+        const parser = c.ts_parser_new() orelse return error.ParserInitFailed;
+        defer c.ts_parser_delete(parser);
+
+        var best_lang: LanguageId = extension_lang orelse fence_lang orelse shebang_lang orelse .zig;
+        var best_score: f64 = -1e9;
+
+        for (candidates.items) |candidate| {
+            _ = c.ts_parser_set_language(parser, languagePtr(candidate));
+            const tree = c.ts_parser_parse_string(parser, null, source.ptr, @intCast(source.len)) orelse continue;
+            defer c.ts_tree_delete(tree);
+
+            const root = c.ts_tree_root_node(tree);
+            var stats = TreeStats{};
+            collectTreeStats(root, 1, &stats);
+            var score = computeScore(stats);
+
+            if (extension_lang != null and candidate == extension_lang.?) score += 140.0;
+            if (fence_lang != null and candidate == fence_lang.?) score += 180.0;
+            if (shebang_lang != null and candidate == shebang_lang.?) score += 160.0;
+
+            if (score > best_score) {
+                best_score = score;
+                best_lang = candidate;
+            }
+        }
+
+        return best_lang;
+    }
+
+    fn appendCandidate(allocator: std.mem.Allocator, candidates: *std.ArrayList(LanguageId), lang: LanguageId) !void {
+        for (candidates.items) |existing| {
+            if (existing == lang) return;
+        }
+        try candidates.append(allocator, lang);
+    }
+
+    fn detectLanguageFromPath(path: []const u8) ?LanguageId {
+        const ext = std.fs.path.extension(path);
+        if (ext.len == 0) return null;
+
+        if (eqExt(ext, ".zig")) return .zig;
+        if (eqExt(ext, ".rs")) return .rust;
+        if (eqExt(ext, ".py")) return .python;
+        if (eqExt(ext, ".js") or eqExt(ext, ".mjs") or eqExt(ext, ".cjs") or eqExt(ext, ".ts") or eqExt(ext, ".tsx")) return .javascript;
+        if (eqExt(ext, ".c")) return .c;
+        if (eqExt(ext, ".cpp") or eqExt(ext, ".cc") or eqExt(ext, ".cxx") or eqExt(ext, ".hpp") or eqExt(ext, ".hh") or eqExt(ext, ".hxx")) return .cpp;
+        if (eqExt(ext, ".go")) return .go;
+        if (eqExt(ext, ".html") or eqExt(ext, ".htm")) return .html;
+        if (eqExt(ext, ".css")) return .css;
+        if (eqExt(ext, ".java")) return .java;
+        if (eqExt(ext, ".rb")) return .ruby;
+        if (eqExt(ext, ".json")) return .json;
+        return null;
+    }
+
+    fn detectLanguageFromFence(source: []const u8) ?LanguageId {
+        const first_newline = std.mem.indexOfScalar(u8, source, '\n') orelse source.len;
+        const first_line = std.mem.trim(u8, source[0..first_newline], " \t\r");
+        if (!std.mem.startsWith(u8, first_line, "```")) return null;
+
+        const tag = std.mem.trim(u8, first_line[3..], " \t\r");
+        if (tag.len == 0) return null;
+        return languageFromHint(tag);
+    }
+
+    fn detectLanguageFromShebang(source: []const u8) ?LanguageId {
+        const first_newline = std.mem.indexOfScalar(u8, source, '\n') orelse source.len;
+        const first_line = std.mem.trim(u8, source[0..first_newline], " \t\r");
+        if (!std.mem.startsWith(u8, first_line, "#!")) return null;
+
+        if (containsIgnoreCase(first_line, "python")) return .python;
+        if (containsIgnoreCase(first_line, "ruby")) return .ruby;
+        if (containsIgnoreCase(first_line, "node") or containsIgnoreCase(first_line, "deno") or containsIgnoreCase(first_line, "bun")) return .javascript;
+        return null;
+    }
+
+    fn languageFromHint(hint: []const u8) ?LanguageId {
+        if (eqIgnoreCase(hint, "zig")) return .zig;
+        if (eqIgnoreCase(hint, "rust") or eqIgnoreCase(hint, "rs")) return .rust;
+        if (eqIgnoreCase(hint, "python") or eqIgnoreCase(hint, "py")) return .python;
+        if (eqIgnoreCase(hint, "javascript") or eqIgnoreCase(hint, "js") or eqIgnoreCase(hint, "typescript") or eqIgnoreCase(hint, "ts") or eqIgnoreCase(hint, "tsx") or eqIgnoreCase(hint, "jsx")) return .javascript;
+        if (eqIgnoreCase(hint, "c")) return .c;
+        if (eqIgnoreCase(hint, "cpp") or eqIgnoreCase(hint, "c++") or eqIgnoreCase(hint, "cc") or eqIgnoreCase(hint, "cxx")) return .cpp;
+        if (eqIgnoreCase(hint, "go") or eqIgnoreCase(hint, "golang")) return .go;
+        if (eqIgnoreCase(hint, "html")) return .html;
+        if (eqIgnoreCase(hint, "css")) return .css;
+        if (eqIgnoreCase(hint, "java")) return .java;
+        if (eqIgnoreCase(hint, "ruby") or eqIgnoreCase(hint, "rb")) return .ruby;
+        if (eqIgnoreCase(hint, "json")) return .json;
+        return null;
+    }
+
+    fn collectTreeStats(node: c.TSNode, depth: u32, stats: *TreeStats) void {
+        stats.total_nodes += 1;
+        if (c.ts_node_is_named(node)) stats.named_nodes += 1;
+        if (c.ts_node_is_missing(node)) stats.missing_nodes += 1;
+        if (depth > stats.max_depth) stats.max_depth = depth;
+
+        const node_type = std.mem.span(c.ts_node_type(node));
+        if (std.mem.eql(u8, node_type, "ERROR")) stats.error_nodes += 1;
+
+        if (c.ts_node_has_error(node)) stats.has_error = true;
+
+        const child_count = c.ts_node_child_count(node);
+        var i: u32 = 0;
+        while (i < child_count) : (i += 1) {
+            collectTreeStats(c.ts_node_child(node, i), depth + 1, stats);
+        }
+    }
+
+    fn computeScore(stats: TreeStats) f64 {
+        const named = @as(f64, @floatFromInt(stats.named_nodes));
+        const total = @as(f64, @floatFromInt(stats.total_nodes));
+        const error_nodes = @as(f64, @floatFromInt(stats.error_nodes));
+        const missing_nodes = @as(f64, @floatFromInt(stats.missing_nodes));
+        const depth = @as(f64, @floatFromInt(stats.max_depth));
+        const named_ratio = if (stats.total_nodes > 0) named / total else 0.0;
+
+        var score = 2.0 * named + 1.0 * depth + 80.0 * named_ratio;
+        if (stats.has_error) score -= 150.0;
+        score -= 14.0 * error_nodes;
+        score -= 8.0 * missing_nodes;
+        return score;
+    }
+
+    fn languagePtr(language: LanguageId) *c.TSLanguage {
+        return switch (language) {
+            .c => tree_sitter_c(),
+            .cpp => tree_sitter_cpp(),
+            .css => tree_sitter_css(),
+            .go => tree_sitter_go(),
+            .html => tree_sitter_html(),
+            .java => tree_sitter_java(),
+            .javascript => tree_sitter_javascript(),
+            .json => tree_sitter_json(),
+            .python => tree_sitter_python(),
+            .ruby => tree_sitter_ruby(),
+            .rust => tree_sitter_rust(),
+            .zig => tree_sitter_zig(),
+        };
+    }
+
+    fn highlightsQuerySource(language: LanguageId) []const u8 {
+        return switch (language) {
+            .c => HighlightsQueryMap.c,
+            .cpp => HighlightsQueryMap.cpp,
+            .css => HighlightsQueryMap.css,
+            .go => HighlightsQueryMap.go,
+            .html => HighlightsQueryMap.html,
+            .java => HighlightsQueryMap.java,
+            .javascript => HighlightsQueryMap.javascript,
+            .json => HighlightsQueryMap.json,
+            .python => HighlightsQueryMap.python,
+            .ruby => HighlightsQueryMap.ruby,
+            .rust => HighlightsQueryMap.rust,
+            .zig => HighlightsQueryMap.zig,
+        };
+    }
+
+    fn languageName(language: LanguageId) []const u8 {
+        return switch (language) {
+            .c => "c",
+            .cpp => "cpp",
+            .css => "css",
+            .go => "go",
+            .html => "html",
+            .java => "java",
+            .javascript => "javascript",
+            .json => "json",
+            .python => "python",
+            .ruby => "ruby",
+            .rust => "rust",
+            .zig => "zig",
+        };
+    }
+
+    fn eqExt(lhs: []const u8, rhs: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(lhs, rhs);
+    }
+
+    fn eqIgnoreCase(lhs: []const u8, rhs: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(lhs, rhs);
+    }
+
+    fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+        if (needle.len == 0) return true;
+        if (haystack.len < needle.len) return false;
+
+        var i: usize = 0;
+        while (i + needle.len <= haystack.len) : (i += 1) {
+            if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+        }
+        return false;
     }
 
     pub fn sourceCodeTokens(self: *Parser, matches: std.ArrayList(Match)) !std.ArrayList(Token) {
