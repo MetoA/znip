@@ -92,20 +92,12 @@ pub const Renderer = struct {
             .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
         });
         pen.positionAtTextStart();
-        var starting_whitespace: ?[]const u8 = null;
-        defer if (starting_whitespace) |ws| self.allocator.free(ws);
-
         for (tokens) |token| {
             var iterator = std.mem.splitScalar(u8, token.text, '\n');
             var first_part = true;
             while (iterator.next()) |chunk| {
                 // Mostly helps with new lines
                 if (!first_part) {
-                    if (starting_whitespace) |ws| {
-                        self.allocator.free(ws);
-                        starting_whitespace = null;
-                    }
-                    starting_whitespace = try self.allocator.dupe(u8, chunk);
                     pen.nextLine();
                     pen.positionAtNumStart();
                     try drawableChunks.append(self.allocator, .{
@@ -136,15 +128,6 @@ pub const Renderer = struct {
                             pen.nextLineIndentation();
                             pen.positionAtTextStart();
 
-                            if (starting_whitespace) |sw| {
-                                self.calculateTextMetrics(&text_metrics, sw);
-                                try drawableChunks.append(self.allocator, .{
-                                    .x = pen.x,
-                                    .y = pen.y,
-                                    .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
-                                    .text = try self.allocator.dupe(u8, sw),
-                                });
-                            }
                             try drawableChunks.append(self.allocator, .{
                                 .type = ChunkType.line_continuation,
                                 .x = pen.x,
@@ -181,7 +164,7 @@ pub const Renderer = struct {
                     try self.drawWrapStartArrow(chunk.x, chunk.y, chunk.color);
                 },
                 .line_continuation => {
-                    try self.drawLineContinuationArrow(chunk.x - 10.0, chunk.y, chunk.color);
+                    try self.drawLineContinuationArrow(chunk.x, chunk.y, chunk.color);
                 },
             }
         }
