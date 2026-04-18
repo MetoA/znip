@@ -3,6 +3,9 @@ const tree_sitter = @import("../core/tree_sitter.zig");
 const Color = u32; // ARGB
 
 const Ui = struct {
+    window_close: Color = 0xFFFF5F56,
+    window_minimize: Color = 0xFFFFBD2E,
+    window_expand: Color = 0xFF27C93F,
     background: Color,
     code_window_background: Color,
     foreground: Color,
@@ -11,7 +14,6 @@ const Ui = struct {
 
 const Syntax = struct {
     comment: Color,
-    comment_doc: ?Color = null,
     constant: Color,
     constant_builtin: ?Color = null,
     constant_character: ?Color = null,
@@ -65,6 +67,8 @@ pub const Theme = struct {
             .keyword_modifier => self.syntax.keyword_modifier orelse self.syntax.keyword,
             .keyword_operator => self.syntax.keyword_operator orelse self.syntax.keyword,
             .keyword_return => self.syntax.keyword_return orelse self.syntax.keyword,
+            .number => self.syntax.number,
+            .operator => self.syntax.operator,
             .property => self.syntax.property,
             .punctuation => self.syntax.punctuation,
             .punctuation_bracket => self.syntax.punctuation_bracket orelse self.syntax.punctuation,

@@ -88,7 +88,7 @@ pub const Renderer = struct {
         try drawableChunks.append(self.allocator, .{
             .x = pen.x,
             .y = pen.y,
-            .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.default_text),
+            .color = self.config.active_theme.ui.line_number,
             .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
         });
         pen.positionAtTextStart();
@@ -237,7 +237,11 @@ pub const Renderer = struct {
     }
 
     pub fn drawCodeWindowControls(self: *Renderer) void {
-        const colors = [_]u32{ 0xFFFF5F56, 0xFFFFBD2E, 0xFF27C93F };
+        const colors = [_]u32{ 
+            self.config.active_theme.ui.window_close,
+            self.config.active_theme.ui.window_minimize,
+            self.config.active_theme.ui.window_expand,
+        };
         for (colors, 0..) |color, index| {
             const center_x = self.config.code_window_options.windowControlsX() + @as(f64, @floatFromInt(index * 20));
             const center_y = self.config.code_window_options.windowControlsY();

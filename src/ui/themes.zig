@@ -38,7 +38,6 @@ pub const MidnightAurora = theme.Theme{
     },
     .syntax = .{
         .comment = 0xFF64748B,
-        .comment_doc = 0xFF94A3B8,
         .constant = 0xFF38BDF8,
         .constant_builtin = 0xFF7DD3FC,
         .constructor = 0xFFF472B6,

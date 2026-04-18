@@ -447,6 +447,8 @@ pub const TokenCategory = enum {
     keyword_modifier,
     keyword_operator,
     keyword_return,
+    number,
+    operator,
     property,
     punctuation,
     punctuation_bracket,
@@ -485,6 +487,10 @@ pub const TokenCategory = enum {
         if (std.mem.startsWith(u8, capture_name, "punctuation")) return .punctuation;
 
         if (std.mem.startsWith(u8, capture_name, "property")) return .property;
+        
+        if (std.mem.startsWith(u8, capture_name, "operator")) return .operator;
+        
+        if (std.mem.startsWith(u8, capture_name, "number")) return .number;
 
         if (std.mem.startsWith(u8, capture_name, "keyword.return")) return .keyword_return;
         if (std.mem.startsWith(u8, capture_name, "keyword.operator")) return .keyword_operator;
