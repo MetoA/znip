@@ -502,6 +502,8 @@ pub const TokenCategory = enum {
         if (std.mem.startsWith(u8, capture_name, "constructor")) return .constructor;
 
         if (std.mem.startsWith(u8, capture_name, "constant")) return .constant;
+        
+        if (std.mem.startsWith(u8, capture_name, "comment")) return .comment;
 
         return .default_text;
     }

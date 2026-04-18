@@ -88,7 +88,7 @@ pub const Renderer = struct {
         try drawableChunks.append(self.allocator, .{
             .x = pen.x,
             .y = pen.y,
-            .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
+            .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.default_text),
             .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
         });
         pen.positionAtTextStart();
@@ -103,7 +103,7 @@ pub const Renderer = struct {
                     try drawableChunks.append(self.allocator, .{
                         .x = pen.x,
                         .y = pen.y,
-                        .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
+                        .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.default_text),
                         .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
                     });
                     pen.positionAtTextStart();
@@ -123,7 +123,7 @@ pub const Renderer = struct {
                                 .type = ChunkType.wrap_indicator,
                                 .x = pen.x + 5.0,
                                 .y = pen.y,
-                                .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
+                                .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.default_text),
                             });
                             pen.nextLineIndentation();
                             pen.positionAtTextStart();
@@ -132,16 +132,17 @@ pub const Renderer = struct {
                                 .type = ChunkType.line_continuation,
                                 .x = pen.x,
                                 .y = pen.y,
-                                .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.default_text).color,
+                                .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.default_text),
                             });
                             pen.advanceX(text_metrics.advance.x);
                         }
 
                         self.calculateTextMetrics(&text_metrics, word);
+                        std.log.debug("CAPTURE: {s}", .{token.capture_name});
                         try drawableChunks.append(self.allocator, .{
                             .x = pen.x,
                             .y = pen.y,
-                            .color = self.config.active_theme.getStyle(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)).color,
+                            .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)),
                             .text = try self.allocator.dupe(u8, word),
                         });
                         pen.advanceX(text_metrics.advance.x);

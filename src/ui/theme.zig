@@ -2,13 +2,6 @@ const tree_sitter = @import("../core/tree_sitter.zig");
 
 const Color = u32; // ARGB
 
-const Style = struct {
-    color: Color,
-    bold: bool = false,
-    italic: bool = false,
-    underline: bool = false,
-};
-
 const Ui = struct {
     background: Color,
     code_window_background: Color,
@@ -17,39 +10,39 @@ const Ui = struct {
 };
 
 const Syntax = struct {
-    comment: Style,
-    comment_doc: ?Style = null,
-    constant: Style,
-    constant_builtin: ?Style = null,
-    constant_character: ?Style = null,
-    constant_macro: ?Style = null,
-    constructor: Style,
-    function: Style,
-    function_builtin: ?Style = null,
-    function_call: ?Style = null,
-    function_method: ?Style = null,
-    keyword: Style,
-    keyword_function: ?Style = null,
-    keyword_modifier: ?Style = null,
-    keyword_operator: ?Style = null,
-    keyword_return: ?Style = null,
-    keyword_control: ?Style = null,
-    label: Style,
-    number: Style,
-    operator: Style,
-    property: Style,
-    punctuation: Style,
-    punctuation_bracket: ?Style = null,
-    punctuation_delimiter: ?Style = null,
-    string: Style,
-    string_escape: ?Style = null,
-    string_regex: ?Style = null,
-    type: Style,
-    type_builtin: ?Style = null,
-    variable: Style,
-    variable_builtin: ?Style = null,
-    variable_member: ?Style = null,
-    variable_parameter: ?Style = null,
+    comment: Color,
+    comment_doc: ?Color = null,
+    constant: Color,
+    constant_builtin: ?Color = null,
+    constant_character: ?Color = null,
+    constant_macro: ?Color = null,
+    constructor: Color,
+    function: Color,
+    function_builtin: ?Color = null,
+    function_call: ?Color = null,
+    function_method: ?Color = null,
+    keyword: Color,
+    keyword_function: ?Color = null,
+    keyword_modifier: ?Color = null,
+    keyword_operator: ?Color = null,
+    keyword_return: ?Color = null,
+    keyword_control: ?Color = null,
+    label: Color,
+    number: Color,
+    operator: Color,
+    property: Color,
+    punctuation: Color,
+    punctuation_bracket: ?Color = null,
+    punctuation_delimiter: ?Color = null,
+    string: Color,
+    string_escape: ?Color = null,
+    string_regex: ?Color = null,
+    type: Color,
+    type_builtin: ?Color = null,
+    variable: Color,
+    variable_builtin: ?Color = null,
+    variable_member: ?Color = null,
+    variable_parameter: ?Color = null,
 };
 
 pub const Theme = struct {
@@ -57,7 +50,7 @@ pub const Theme = struct {
     ui: Ui,
     syntax: Syntax,
     
-    pub fn getStyle(self: *Theme, category: tree_sitter.TokenCategory) Style {
+    pub fn getColor(self: *Theme, category: tree_sitter.TokenCategory) Color {
         return switch (category) {
             .comment => self.syntax.comment,
             .constant => self.syntax.constant,
@@ -87,7 +80,7 @@ pub const Theme = struct {
             .variable_builtin => self.syntax.variable_builtin orelse self.syntax.variable,
             .variable_member => self.syntax.variable_member orelse self.syntax.variable,
             .variable_parameter => self.syntax.variable_parameter orelse self.syntax.variable,
-            .default_text => Style{ .color = self.ui.foreground },
+            .default_text => self.ui.foreground,
         };
     }
 };
