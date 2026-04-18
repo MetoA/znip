@@ -147,12 +147,6 @@ pub const Parser = struct {
 
                 // std.log.debug("Found '{s}' at {d}:{d} -> Type: @{s}", .{ text, start_byte, end_byte, capture_name });
 
-                // Skips same match that has multiple tags, e.g. "mainmainmain"
-                if (matches.items.len > 0) {
-                    const last = matches.items[matches.items.len - 1];
-                    if (start_byte < last.end_byte) continue;
-                }
-
                 try matches.append(self.allocator, .{
                     .start_byte = start_byte,
                     .end_byte = end_byte,
@@ -398,7 +392,7 @@ pub const Parser = struct {
                 const is_newline = std.mem.eql(u8, gap_text, "\n");
                 try tokens.append(self.allocator, .{
                     .text = gap_text,
-                    .capture_name = match.capture_name,
+                    .capture_name = "",
                     .is_newline = is_newline,
                 });
             }
@@ -417,7 +411,7 @@ pub const Parser = struct {
             const gap_text = try self.allocator.dupe(u8, self.source_code[current_byte..]);
             const is_newline = std.mem.eql(u8, gap_text, "\n");
             try tokens.append(self.allocator, .{
-                .text = try self.allocator.dupe(u8, self.source_code[current_byte..]),
+                .text = gap_text,
                 .capture_name = "",
                 .is_newline = is_newline,
             });
@@ -475,40 +469,40 @@ pub const TokenCategory = enum {
         if (std.mem.startsWith(u8, capture_name, "variable.member")) return .variable_member;
         if (std.mem.startsWith(u8, capture_name, "variable.builtin")) return .variable_builtin;
         if (std.mem.startsWith(u8, capture_name, "variable")) return .variable;
-        
+
         if (std.mem.startsWith(u8, capture_name, "type.builtin")) return .type_builtin;
         if (std.mem.startsWith(u8, capture_name, "type")) return .type;
-        
+
         if (std.mem.startsWith(u8, capture_name, "tag.attribute")) return .tag_attribute;
         if (std.mem.startsWith(u8, capture_name, "tag")) return .tag;
-        
+
         if (std.mem.startsWith(u8, capture_name, "string.special")) return .string_special;
         if (std.mem.startsWith(u8, capture_name, "string.escape")) return .string_escape;
         if (std.mem.startsWith(u8, capture_name, "string")) return .string;
-        
+
         if (std.mem.startsWith(u8, capture_name, "punctuation.delimiter")) return .punctuation_delimiter;
         if (std.mem.startsWith(u8, capture_name, "punctuation.bracket")) return .punctuation_bracket;
         if (std.mem.startsWith(u8, capture_name, "punctuation")) return .punctuation;
-        
+
         if (std.mem.startsWith(u8, capture_name, "property")) return .property;
-        
+
         if (std.mem.startsWith(u8, capture_name, "keyword.return")) return .keyword_return;
         if (std.mem.startsWith(u8, capture_name, "keyword.operator")) return .keyword_operator;
         if (std.mem.startsWith(u8, capture_name, "keyword.modifier")) return .keyword_modifier;
         if (std.mem.startsWith(u8, capture_name, "keyword.function")) return .keyword_function;
         if (std.mem.startsWith(u8, capture_name, "keyword")) return .keyword;
-        
+
         if (std.mem.startsWith(u8, capture_name, "function.method")) return .function_method;
         if (std.mem.startsWith(u8, capture_name, "function.call")) return .function_call;
         if (std.mem.startsWith(u8, capture_name, "function.builtin")) return .function_builtin;
         if (std.mem.startsWith(u8, capture_name, "function")) return .function;
-        
+
         if (std.mem.startsWith(u8, capture_name, "field")) return .field;
-        
+
         if (std.mem.startsWith(u8, capture_name, "constructor")) return .constructor;
-        
+
         if (std.mem.startsWith(u8, capture_name, "constant")) return .constant;
-        
+
         return .default_text;
     }
 };
