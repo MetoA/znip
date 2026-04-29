@@ -8,6 +8,8 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    
+    try znip.createRootConfigDirectories(allocator);
 
     var cli_config = cli.parse(allocator) catch |err| switch (err) {
         error.InvalidStartEndLines => {

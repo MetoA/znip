@@ -1,6 +1,7 @@
 const std = @import("std");
 const tree_sitter = @import("core/tree_sitter.zig");
 const Config = @import("core/config.zig").Config;
+const root_config = @import("core/config.zig");
 const Renderer = @import("ui/renderer.zig").Renderer;
 
 pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8) !void {
@@ -28,4 +29,8 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     renderer.drawCodeWindowControls();
     renderer.drawChunks(chunks.items);
     renderer.saveImage(file_name);
+}
+
+pub fn createRootConfigDirectories(allocator: std.mem.Allocator) !void {
+    try root_config.createRootConfigDirectories(allocator);
 }

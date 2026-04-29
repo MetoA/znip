@@ -2,8 +2,6 @@ const std = @import("std");
 const tree_sitter = @import("../core/tree_sitter.zig");
 const SplitInclusiveIterator = @import("../util/split_inclusive_iterator.zig").SplitInclusiveIterator;
 const fonts = @import("../assets/fonts/fonts.zig");
-const Theme = @import("theme.zig").Theme;
-const themes = @import("themes.zig");
 const Config = @import("../core/config.zig").Config;
 const c = @cImport({
     @cInclude("blend2d/blend2d.h");
@@ -103,7 +101,7 @@ pub const Renderer = struct {
                     try drawableChunks.append(self.allocator, .{
                         .x = pen.x,
                         .y = pen.y,
-                        .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.default_text),
+                        .color = self.config.active_theme.ui.line_number,
                         .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
                     });
                     pen.positionAtTextStart();
