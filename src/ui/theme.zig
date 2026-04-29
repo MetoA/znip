@@ -1,3 +1,4 @@
+const std = @import("std");
 const tree_sitter = @import("../core/tree_sitter.zig");
 
 const Color = u32; // ARGB
@@ -201,4 +202,20 @@ pub const PaperWhite = Theme {
         .variable_parameter = 0xFFE36209,
     },
 };
+
+const builtin_themes = [_]Theme{
+    OneDarker,
+    MidnightAurora,
+    SolarizedLight,
+    PaperWhite,
+};
+
+pub fn getThemeByName(name: []const u8) Theme {
+    for (builtin_themes) |theme| {
+        if (std.mem.eql(u8, theme.name, name)) {
+            return theme;
+        }
+    }
+    return OneDarker;
+}
 

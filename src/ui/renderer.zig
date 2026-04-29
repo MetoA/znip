@@ -2,10 +2,18 @@ const std = @import("std");
 const tree_sitter = @import("../core/tree_sitter.zig");
 const SplitInclusiveIterator = @import("../util/split_inclusive_iterator.zig").SplitInclusiveIterator;
 const fonts = @import("../assets/fonts/fonts.zig");
-const Config = @import("../core/config.zig").Config;
+const Preset = @import("../core/config.zig").Preset;
+const theme = @import("theme.zig");
 const c = @cImport({
     @cInclude("blend2d/blend2d.h");
 });
+
+const code_window_max_width: f64 = 700.0;
+const code_window_radius: f64 = 12.0;
+const box_shadow_offset_x: f64 = 0.0;
+const box_shadow_offset_y: f64 = 5.0;
+const box_shadow_blur: f64 = 20.0;
+const box_shadow_color: u32 = 0x10000000;
 
 pub const Renderer = struct {
     image: c.BLImageCore = undefined,
@@ -14,13 +22,15 @@ pub const Renderer = struct {
     font: c.BLFontCore = undefined,
     font_data: c.BLFontDataCore = undefined,
     glyph_buffer: c.BLGlyphBufferCore = undefined,
-    config: Config = undefined,
+    preset: Preset,
+    active_theme: theme.Theme,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, config: Config) !Renderer {
+    pub fn init(allocator: std.mem.Allocator, preset: Preset, active_theme: theme.Theme) !Renderer {
         var self: Renderer = undefined;
         self.allocator = allocator;
-        self.config = config;
+        self.preset = preset;
+        self.active_theme = active_theme;
 
         _ = c.bl_font_face_init(&self.face);
         errdefer _ = c.bl_font_face_reset(&self.face);
@@ -40,7 +50,7 @@ pub const Renderer = struct {
         }
 
         _ = c.bl_font_init(&self.font);
-        _ = c.bl_font_create_from_face(&self.font, &self.face, self.config.font_size);
+        _ = c.bl_font_create_from_face(&self.font, &self.face, @floatFromInt(self.preset.font_size));
         errdefer _ = c.bl_font_reset(&self.font);
 
         return self;
@@ -67,8 +77,8 @@ pub const Renderer = struct {
             .descent = descent,
             .line_height = ascent + descent + font_metrics.line_gap,
             .char_width = char_width,
-            .margin_x = self.config.code_window_options.codeStartX(),
-            .margin_y = self.config.code_window_options.codeStartY(),
+            .margin_x = @as(f32, @floatFromInt(self.preset.horizontal_padding_px)) + 50.0,
+            .margin_y = @as(f32, @floatFromInt(self.preset.vertical_padding_px)) + 50.0,
         };
     }
 
@@ -81,12 +91,12 @@ pub const Renderer = struct {
             }
             drawableChunks.deinit(self.allocator);
         }
-        var pen = Pen.init(self.config.code_window_options.lineNumberX(), font_metrics.margin_x, font_metrics.margin_y + font_metrics.ascent, font_metrics.line_height);
+        var pen = Pen.init(@as(f64, @floatFromInt(self.preset.horizontal_padding_px)) + 5.0, font_metrics.margin_x, font_metrics.margin_y + font_metrics.ascent, font_metrics.line_height);
 
         try drawableChunks.append(self.allocator, .{
             .x = pen.x,
             .y = pen.y,
-            .color = self.config.active_theme.ui.line_number,
+            .color = self.active_theme.ui.line_number,
             .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
         });
         pen.positionAtTextStart();
@@ -101,7 +111,7 @@ pub const Renderer = struct {
                     try drawableChunks.append(self.allocator, .{
                         .x = pen.x,
                         .y = pen.y,
-                        .color = self.config.active_theme.ui.line_number,
+                        .color = self.active_theme.ui.line_number,
                         .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
                     });
                     pen.positionAtTextStart();
@@ -121,7 +131,7 @@ pub const Renderer = struct {
                                 .type = ChunkType.wrap_indicator,
                                 .x = pen.x + 5.0,
                                 .y = pen.y,
-                                .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.default_text),
+                                .color = self.active_theme.getColor(tree_sitter.TokenCategory.default_text),
                             });
                             pen.nextLineIndentation();
                             pen.positionAtTextStart();
@@ -130,17 +140,16 @@ pub const Renderer = struct {
                                 .type = ChunkType.line_continuation,
                                 .x = pen.x,
                                 .y = pen.y,
-                                .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.default_text),
+                                .color = self.active_theme.getColor(tree_sitter.TokenCategory.default_text),
                             });
                             pen.advanceX(text_metrics.advance.x);
                         }
 
                         self.calculateTextMetrics(&text_metrics, word);
-                        std.log.debug("CAPTURE: {s}", .{token.capture_name});
                         try drawableChunks.append(self.allocator, .{
                             .x = pen.x,
                             .y = pen.y,
-                            .color = self.config.active_theme.getColor(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)),
+                            .color = self.active_theme.getColor(tree_sitter.TokenCategory.categorizeCapture(token.capture_name)),
                             .text = try self.allocator.dupe(u8, word),
                         });
                         pen.advanceX(text_metrics.advance.x);
@@ -152,7 +161,7 @@ pub const Renderer = struct {
         return drawableChunks;
     }
 
-    pub fn drawChunks(self: *Renderer, chunks: []DrawableChunk) void {
+    pub fn drawChunks(self: *Renderer, chunks: []DrawableChunk) !void {
         for (chunks) |chunk| {
             switch (chunk.type) {
                 .text => {
@@ -176,54 +185,57 @@ pub const Renderer = struct {
     }
 
     pub fn initImage(self: *Renderer, last_line_y: f64) void {
-        const width = @as(i32, @intFromFloat(self.config.code_window_options.max_width + 2 * self.config.code_window_options.x()));
-        const height = @as(i32, @intFromFloat(self.config.code_window_options.heightFromLastY(last_line_y) + 2 * self.config.code_window_options.y()));
+        const pad_x = @as(f64, @floatFromInt(self.preset.horizontal_padding_px));
+        const pad_y = @as(f64, @floatFromInt(self.preset.vertical_padding_px));
+        const width = @as(i32, @intFromFloat(code_window_max_width + 2 * pad_x));
+        const height = @as(i32, @intFromFloat(last_line_y + 25.0 + pad_y));
         _ = c.bl_image_init_as(&self.image, width, height, c.BL_FORMAT_PRGB32);
         _ = c.bl_context_init_as(&self.context, &self.image, null);
     }
 
     pub fn fillBackground(self: *Renderer) void {
-        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.config.active_theme.ui.background);
+        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.background);
         _ = c.bl_context_fill_all(&self.context);
     }
 
     pub fn drawCodeWindow(self: *Renderer, last_line_y: f64) !void {
+        const pad_x = @as(f64, @floatFromInt(self.preset.horizontal_padding_px));
+        const pad_y = @as(f64, @floatFromInt(self.preset.vertical_padding_px));
         const rect = c.BLRoundRect{
-            .x = self.config.code_window_options.x(),
-            .y = self.config.code_window_options.y(),
-            .w = self.config.code_window_options.max_width,
-            .h = self.config.code_window_options.heightFromLastY(last_line_y),
-            .rx = self.config.code_window_options.radius,
-            .ry = self.config.code_window_options.radius,
+            .x = pad_x,
+            .y = pad_y,
+            .w = code_window_max_width,
+            .h = last_line_y + 25.0 - pad_y,
+            .rx = code_window_radius,
+            .ry = code_window_radius,
         };
 
-        if (self.config.code_window_options.box_shadow.enabled) {
+        if (self.preset.include_drop_shadow) {
             try self.drawBoxShadow(rect);
         }
-        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.config.active_theme.ui.code_window_background);
+        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.code_window_background);
         _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_ROUND_RECT, &rect);
     }
 
     // Fake blur by rendering multiple gray rectangles with decreasing alpha values as they spread out
     fn drawBoxShadow(self: *Renderer, code_rect: c.BLRoundRect) !void {
-        const box_shadow = self.config.code_window_options.box_shadow;
         const passes: usize = 12;
 
         var pass: usize = 0;
         while (pass < passes) : (pass += 1) {
             const spread_range = @as(f64, @floatFromInt(passes - pass)) / @as(f64, @floatFromInt(passes));
-            const spread = box_shadow.blur * spread_range;
+            const spread = box_shadow_blur * spread_range;
 
             // Alpha fades out toward the outer passes
-            const base_alpha: f64 = @as(f64, @floatFromInt((box_shadow.color >> 24) & 0xFF));
+            const base_alpha: f64 = @as(f64, @floatFromInt((box_shadow_color >> 24) & 0xFF));
             const alpha = @as(u32, @intFromFloat(base_alpha * (1.0 - spread_range) * (2.0 / @as(f64, @floatFromInt(passes)))));
-            const color = (alpha << 24) | (box_shadow.color & 0x00FFFFFF);
+            const color = (alpha << 24) | (box_shadow_color & 0x00FFFFFF);
 
             _ = c.bl_context_set_fill_style_rgba32(&self.context, color);
 
             var rect = c.BLRoundRect{
-                .x = code_rect.x + box_shadow.offset_x - spread,
-                .y = code_rect.y + box_shadow.offset_y - spread,
+                .x = code_rect.x + box_shadow_offset_x - spread,
+                .y = code_rect.y + box_shadow_offset_y - spread,
                 .w = code_rect.w + spread * 2.0,
                 .h = code_rect.h + spread * 2.0,
                 .rx = code_rect.rx,
@@ -235,14 +247,16 @@ pub const Renderer = struct {
     }
 
     pub fn drawCodeWindowControls(self: *Renderer) void {
-        const colors = [_]u32{ 
-            self.config.active_theme.ui.window_close,
-            self.config.active_theme.ui.window_minimize,
-            self.config.active_theme.ui.window_expand,
+        const colors = [_]u32{
+            self.active_theme.ui.window_close,
+            self.active_theme.ui.window_minimize,
+            self.active_theme.ui.window_expand,
         };
+        const pad_x = @as(f64, @floatFromInt(self.preset.horizontal_padding_px));
+        const pad_y = @as(f64, @floatFromInt(self.preset.vertical_padding_px));
         for (colors, 0..) |color, index| {
-            const center_x = self.config.code_window_options.windowControlsX() + @as(f64, @floatFromInt(index * 20));
-            const center_y = self.config.code_window_options.windowControlsY();
+            const center_x = pad_x + 25.0 + @as(f64, @floatFromInt(index * 20));
+            const center_y = pad_y + 25.0;
             const radius = @as(f64, @floatFromInt(6));
             const circle = c.BLCircle{ .cx = center_x, .cy = center_y, .r = radius };
             _ = c.bl_context_set_fill_style_rgba32(&self.context, color);

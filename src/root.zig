@@ -1,17 +1,19 @@
 const std = @import("std");
 const tree_sitter = @import("core/tree_sitter.zig");
-const Config = @import("core/config.zig").Config;
+const Preset = @import("core/config.zig").Preset;
 const root_config = @import("core/config.zig");
+const theme = @import("ui/theme.zig");
 const Renderer = @import("ui/renderer.zig").Renderer;
 
-pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8) !void {
+pub const config = @import("core/config.zig");
+pub const theme_module = @import("ui/theme.zig");
+
+pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8, preset: Preset, active_theme: theme.Theme) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
-    
-    const config = try Config.init();
 
-    var renderer = try Renderer.init(arena_allocator, config);
+    var renderer = try Renderer.init(arena_allocator, preset, active_theme);
     defer renderer.deinit();
 
     var parser = tree_sitter.Parser.init(arena_allocator, source_code, source_hint_path);
@@ -27,7 +29,7 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     renderer.fillBackground();
     try renderer.drawCodeWindow(last_chunk_height);
     renderer.drawCodeWindowControls();
-    renderer.drawChunks(chunks.items);
+    try renderer.drawChunks(chunks.items);
     renderer.saveImage(file_name);
 }
 

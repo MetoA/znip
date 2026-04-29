@@ -1,6 +1,8 @@
 const std = @import("std");
 const znip = @import("znip");
 const cli = @import("core/cli.zig");
+const config = znip.config;
+const theme = znip.theme_module;
 const util_files = @import("util/files.zig");
 const clipboard = @import("clipboard/clipboard.zig");
 
@@ -31,6 +33,16 @@ pub fn main() !void {
         try cli.help();
         return;
     }
+
+    var parsed_config = try config.Config.load(allocator);
+    defer parsed_config.deinit();
+
+    const preset_name = cli_config.preset orelse parsed_config.value.active_preset;
+
+    var parsed_preset = try config.Config.loadPreset(allocator, preset_name);
+    defer parsed_preset.deinit();
+
+    const active_theme = theme.getThemeByName(parsed_preset.value.theme);
 
     var code: ?[:0]u8 = null;
 
@@ -73,7 +85,7 @@ pub fn main() !void {
     defer allocator.free(file_name);
     
     if (code) |c| {
-        try znip.renderImage(c, file_name, cli_config.file_path);
+        try znip.renderImage(c, file_name, cli_config.file_path, parsed_preset.value, active_theme);
     }
 
     if (cli_config.to_clipboard) {

@@ -9,9 +9,11 @@ pub const CLIConfig = struct {
     interactive: bool = false,
     from_clipboard: bool = false,
     to_clipboard: bool = false,
+    preset: ?[]const u8 = null,
 
     pub fn deinit(self: *CLIConfig, allocator: std.mem.Allocator) void {
         if (self.file_path) |path| allocator.free(path);
+        if (self.preset) |preset| allocator.free(preset);
     }
 };
 
@@ -22,6 +24,7 @@ pub const params = clap.parseParamsComptime(
     \\    --from-clipboard Uses the text available in your clipboard
     \\    --to-clipboard   Copies the generated image to your clipboard
     \\-i, --interactive    Initiates an interactive step by step process of selecting various configurations
+    \\-p, --preset <str>   Use a specific preset for this run
     \\<str>                The file path of the code that would be used
 );
 
@@ -42,6 +45,10 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     const raw_path = if (result.positionals.len > 0) result.positionals[0] else null;
     const file_path = if (raw_path) |p| try allocator.dupe(u8, p) else null;
     errdefer if (file_path) |fp| allocator.free(fp);
+
+    const raw_preset: ?[]const u8 = result.args.preset;
+    const preset = if (raw_preset) |p| try allocator.dupe(u8, p) else null;
+    errdefer if (preset) |pr| allocator.free(pr);
 
     const from_clipboard = result.args.@"from-clipboard" != 0; 
     if (file_path != null and from_clipboard) {
@@ -70,6 +77,7 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
         .from_clipboard = from_clipboard,
         .to_clipboard = result.args.@"to-clipboard" != 0,
         .interactive = result.args.interactive != 0,
+        .preset = preset,
     };
 }
 

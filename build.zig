@@ -96,15 +96,12 @@ pub fn build(b: *std.Build) !void {
         "-fno-math-errno",
     });
     if (target.result.cpu.arch == .x86_64) {
-        std.log.debug("x86", .{});
         try b2d_flags.append(b.allocator, "-msse4.2");
         try b2d_flags.append(b.allocator, "-mavx2");
         try b2d_flags.append(b.allocator, "-DBL_BUILD_OPT_AVX2");
         try b2d_flags.append(b.allocator, "-DBL_BUILD_OPT_SSE2");
     } else if (target.result.cpu.arch.isAARCH64()) {
-        std.log.debug("aarch64", .{});
     } else if (target.result.cpu.arch.isArm()) {
-        std.log.debug("arm", .{});
         try b2d_flags.append(b.allocator, "-mfpu=neon");
     }
     exe.addIncludePath(b.path("vendor/blend2d"));
