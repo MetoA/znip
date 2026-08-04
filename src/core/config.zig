@@ -33,21 +33,52 @@ pub const Config = struct {
     }
 
     pub fn loadPreset(allocator: std.mem.Allocator, name: []const u8) !std.json.Parsed(Preset) {
-        const home = try std.process.getEnvVarOwned(allocator, "HOME");
-        defer allocator.free(home);
+        return readPresetFile(allocator, name) catch |err| switch (err) {
+            error.FileNotFound => {
+                if (std.mem.eql(u8, name, "default")) {
+                    return try std.json.parseFromSlice(Preset, allocator, preset_default, .{ .allocate = .alloc_always });
+                }
+                return readPresetFile(allocator, "default") catch |err2| switch (err2) {
+                    error.FileNotFound => try std.json.parseFromSlice(Preset, allocator, preset_default, .{ .allocate = .alloc_always }),
+                    else => err2,
+                };
+            },
+            else => err,
+        };
+    }
 
-        const path = try std.fs.path.join(allocator, &[_][]const u8{ home, ".znip", "presets", name });
-        defer allocator.free(path);
+    pub fn savePreset(allocator: std.mem.Allocator, preset: Preset) !void {
+        const name = preset.name orelse return error.PresetNameRequired;
 
-        const path_with_ext = try std.mem.concat(allocator, u8, &[_][]const u8{ path, ".json" });
+        const path_with_ext = try presetPath(allocator, name);
         defer allocator.free(path_with_ext);
 
-        const data = try std.fs.cwd().readFileAlloc(allocator, path_with_ext, 1024 * 1024);
-        defer allocator.free(data);
+        const json_data = try std.json.Stringify.valueAlloc(allocator, preset, .{ .whitespace = .indent_2 });
+        defer allocator.free(json_data);
 
-        return try std.json.parseFromSlice(Preset, allocator, data, .{ .allocate = .alloc_always});
+        try std.fs.cwd().writeFile(.{ .sub_path = path_with_ext, .data = json_data });
     }
 };
+
+fn presetPath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    defer allocator.free(home);
+
+    const path = try std.fs.path.join(allocator, &[_][]const u8{ home, ".znip", "presets", name });
+    defer allocator.free(path);
+
+    return try std.mem.concat(allocator, u8, &[_][]const u8{ path, ".json" });
+}
+
+fn readPresetFile(allocator: std.mem.Allocator, name: []const u8) !std.json.Parsed(Preset) {
+    const path_with_ext = try presetPath(allocator, name);
+    defer allocator.free(path_with_ext);
+
+    const data = try std.fs.cwd().readFileAlloc(allocator, path_with_ext, 1024 * 1024);
+    defer allocator.free(data);
+
+    return try std.json.parseFromSlice(Preset, allocator, data, .{ .allocate = .alloc_always });
+}
 
 pub fn createRootConfigDirectories(allocator: std.mem.Allocator) !void {
     try createRootDirectory(allocator, ".znip");
