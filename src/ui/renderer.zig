@@ -14,6 +14,7 @@ const box_shadow_offset_x: f64 = 0.0;
 const box_shadow_offset_y: f64 = 5.0;
 const box_shadow_blur: f64 = 20.0;
 const box_shadow_color: u32 = 0x10000000;
+const line_continuation_arrow_width: f64 = 14.0;
 
 pub const Renderer = struct {
     image: c.BLImageCore = undefined,
@@ -126,7 +127,8 @@ pub const Renderer = struct {
 
                 if (chunk.len > 0) {
                     var wordsIterator = SplitInclusiveIterator{ .buffer = chunk, .delimiter = " ", .index = 0 };
-                    while (wordsIterator.next()) |word| {
+                    while (wordsIterator.next()) |raw_word| {
+                        var word = raw_word;
                         var text_metrics: c.BLTextMetrics = undefined;
                         self.calculateTextMetrics(&text_metrics, word);
 
@@ -147,10 +149,13 @@ pub const Renderer = struct {
                                 .y = pen.y,
                                 .color = self.active_theme.getColor(tree_sitter.TokenCategory.default_text),
                             });
-                            pen.advanceX(text_metrics.advance.x);
+                            pen.advanceX(line_continuation_arrow_width);
+
+                            word = std.mem.trimLeft(u8, word, " ");
+                            if (word.len == 0) continue;
+                            self.calculateTextMetrics(&text_metrics, word);
                         }
 
-                        self.calculateTextMetrics(&text_metrics, word);
                         try drawableChunks.append(self.allocator, .{
                             .x = pen.x,
                             .y = pen.y,
@@ -309,7 +314,7 @@ pub const Renderer = struct {
 
     // Straight arrow, drawn at the start of a new line, after wrapping text
     fn drawLineContinuationArrow(self: *Renderer, x: f64, y: f64, color: u32) !void {
-        const size: f64 = 8.0;
+        const size: f64 = line_continuation_arrow_width - 6.0;
         const origin = c.BLPoint{ .x = 0, .y = 0 };
         const metrics = self.fontMetrics();
         // Center the arrow by moving it back a bit
