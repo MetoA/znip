@@ -133,11 +133,27 @@ pub fn build(b: *std.Build) !void {
     
     const languages = [_][]const u8{ "zig", "rust", "javascript", "typescript", "python", "c", "cpp", "go", "html", "css", "java", "ruby", "php", "json", "markdown", "sql" };
 
+    // Some grammar repos nest the actual grammar source below the repo root
+    // instead of directly under `src/` (e.g. because the repo hosts multiple
+    // grammar variants side by side).
+    const src_subdir_overrides = [_]struct { language: []const u8, subdir: []const u8 }{
+        .{ .language = "typescript", .subdir = "typescript" },
+        .{ .language = "php", .subdir = "php" },
+        .{ .language = "markdown", .subdir = "tree-sitter-markdown" },
+    };
+
     for (languages) |language| {
         const repo_path = b.fmt("src/deps/tree-sitter-{s}", .{language});
 
-        // TODO check for other directories as well...
-        const src_dir = b.pathJoin(&.{ repo_path, "src" });
+        var grammar_path = repo_path;
+        for (src_subdir_overrides) |override| {
+            if (std.mem.eql(u8, override.language, language)) {
+                grammar_path = b.pathJoin(&.{ repo_path, override.subdir });
+                break;
+            }
+        }
+
+        const src_dir = b.pathJoin(&.{ grammar_path, "src" });
         const parser_c = b.pathJoin(&.{ src_dir, "parser.c" });
 
         if (std.fs.cwd().access(parser_c, .{})) |_| {
@@ -158,7 +174,6 @@ pub fn build(b: *std.Build) !void {
                 exe.root_module.link_libcpp = true;
             }
         } else |err| {
-            // TODO typescript php markdown
             std.log.err("Skipping {s}: parser.c not found in src/ ({s})", .{ language, @errorName(err) });
         }
     }

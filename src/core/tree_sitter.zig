@@ -34,7 +34,7 @@ const HighlightsQueryMap = struct {
     pub const python = @embedFile("../deps/tree-sitter-python/queries/highlights.scm");
     pub const ruby = @embedFile("../deps/tree-sitter-ruby/queries/highlights.scm");
     pub const rust = @embedFile("../deps/tree-sitter-rust/queries/highlights.scm");
-    pub const sql = @embedFile("../deps/tree-sitter-sql/queries/highlights.scm");
+    pub const sql = @embedFile("../deps/tree-sitter-sql/queries/sql/highlights.scm");
     pub const typescript = @embedFile("../deps/tree-sitter-typescript/queries/highlights.scm");
     pub const zig = @embedFile("../deps/tree-sitter-zig/queries/highlights.scm");
 };
@@ -48,9 +48,13 @@ const LanguageId = enum {
     java,
     javascript,
     json,
+    markdown,
+    php,
     python,
     ruby,
     rust,
+    sql,
+    typescript,
     zig,
 };
 
@@ -58,6 +62,7 @@ const all_languages = [_]LanguageId{
     .zig,
     .rust,
     .javascript,
+    .typescript,
     .python,
     .c,
     .cpp,
@@ -67,6 +72,9 @@ const all_languages = [_]LanguageId{
     .java,
     .ruby,
     .json,
+    .php,
+    .markdown,
+    .sql,
 };
 
 const TreeStats = struct {
@@ -219,7 +227,8 @@ pub const Parser = struct {
         if (eqExt(ext, ".zig")) return .zig;
         if (eqExt(ext, ".rs")) return .rust;
         if (eqExt(ext, ".py")) return .python;
-        if (eqExt(ext, ".js") or eqExt(ext, ".mjs") or eqExt(ext, ".cjs") or eqExt(ext, ".ts") or eqExt(ext, ".tsx")) return .javascript;
+        if (eqExt(ext, ".js") or eqExt(ext, ".mjs") or eqExt(ext, ".cjs")) return .javascript;
+        if (eqExt(ext, ".ts") or eqExt(ext, ".tsx")) return .typescript;
         if (eqExt(ext, ".c")) return .c;
         if (eqExt(ext, ".cpp") or eqExt(ext, ".cc") or eqExt(ext, ".cxx") or eqExt(ext, ".hpp") or eqExt(ext, ".hh") or eqExt(ext, ".hxx")) return .cpp;
         if (eqExt(ext, ".go")) return .go;
@@ -228,6 +237,9 @@ pub const Parser = struct {
         if (eqExt(ext, ".java")) return .java;
         if (eqExt(ext, ".rb")) return .ruby;
         if (eqExt(ext, ".json")) return .json;
+        if (eqExt(ext, ".php")) return .php;
+        if (eqExt(ext, ".md") or eqExt(ext, ".markdown")) return .markdown;
+        if (eqExt(ext, ".sql")) return .sql;
         return null;
     }
 
@@ -256,7 +268,8 @@ pub const Parser = struct {
         if (eqIgnoreCase(hint, "zig")) return .zig;
         if (eqIgnoreCase(hint, "rust") or eqIgnoreCase(hint, "rs")) return .rust;
         if (eqIgnoreCase(hint, "python") or eqIgnoreCase(hint, "py")) return .python;
-        if (eqIgnoreCase(hint, "javascript") or eqIgnoreCase(hint, "js") or eqIgnoreCase(hint, "typescript") or eqIgnoreCase(hint, "ts") or eqIgnoreCase(hint, "tsx") or eqIgnoreCase(hint, "jsx")) return .javascript;
+        if (eqIgnoreCase(hint, "javascript") or eqIgnoreCase(hint, "js") or eqIgnoreCase(hint, "jsx")) return .javascript;
+        if (eqIgnoreCase(hint, "typescript") or eqIgnoreCase(hint, "ts") or eqIgnoreCase(hint, "tsx")) return .typescript;
         if (eqIgnoreCase(hint, "c")) return .c;
         if (eqIgnoreCase(hint, "cpp") or eqIgnoreCase(hint, "c++") or eqIgnoreCase(hint, "cc") or eqIgnoreCase(hint, "cxx")) return .cpp;
         if (eqIgnoreCase(hint, "go") or eqIgnoreCase(hint, "golang")) return .go;
@@ -265,6 +278,9 @@ pub const Parser = struct {
         if (eqIgnoreCase(hint, "java")) return .java;
         if (eqIgnoreCase(hint, "ruby") or eqIgnoreCase(hint, "rb")) return .ruby;
         if (eqIgnoreCase(hint, "json")) return .json;
+        if (eqIgnoreCase(hint, "php")) return .php;
+        if (eqIgnoreCase(hint, "markdown") or eqIgnoreCase(hint, "md")) return .markdown;
+        if (eqIgnoreCase(hint, "sql")) return .sql;
         return null;
     }
 
@@ -311,9 +327,13 @@ pub const Parser = struct {
             .java => tree_sitter_java(),
             .javascript => tree_sitter_javascript(),
             .json => tree_sitter_json(),
+            .markdown => tree_sitter_markdown(),
+            .php => tree_sitter_php(),
             .python => tree_sitter_python(),
             .ruby => tree_sitter_ruby(),
             .rust => tree_sitter_rust(),
+            .sql => tree_sitter_sql(),
+            .typescript => tree_sitter_typescript(),
             .zig => tree_sitter_zig(),
         };
     }
@@ -328,9 +348,13 @@ pub const Parser = struct {
             .java => HighlightsQueryMap.java,
             .javascript => HighlightsQueryMap.javascript,
             .json => HighlightsQueryMap.json,
+            .markdown => HighlightsQueryMap.markdown,
+            .php => HighlightsQueryMap.php,
             .python => HighlightsQueryMap.python,
             .ruby => HighlightsQueryMap.ruby,
             .rust => HighlightsQueryMap.rust,
+            .sql => HighlightsQueryMap.sql,
+            .typescript => HighlightsQueryMap.typescript,
             .zig => HighlightsQueryMap.zig,
         };
     }
@@ -345,9 +369,13 @@ pub const Parser = struct {
             .java => "java",
             .javascript => "javascript",
             .json => "json",
+            .markdown => "markdown",
+            .php => "php",
             .python => "python",
             .ruby => "ruby",
             .rust => "rust",
+            .sql => "sql",
+            .typescript => "typescript",
             .zig => "zig",
         };
     }
