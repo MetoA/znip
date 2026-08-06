@@ -187,6 +187,7 @@ pub fn run(allocator: std.mem.Allocator) !Result {
 
     const font_size = try wiz.numberInput("Font size (px)", 16);
     const window_controls = try wiz.confirm("Show window controls?", true);
+    const show_file_name = try wiz.confirm("Show file name (when reading from a file)?", true);
     const vertical_padding_px = try wiz.numberInput("Vertical padding (px)", 50);
     const horizontal_padding_px = try wiz.numberInput("Horizontal padding (px)", 50);
     const include_drop_shadow = try wiz.confirm("Include drop shadow?", true);
@@ -207,6 +208,7 @@ pub fn run(allocator: std.mem.Allocator) !Result {
         .font = font_name,
         .font_size = font_size,
         .window_controls = window_controls,
+        .show_file_name = show_file_name,
         .vertical_padding_px = vertical_padding_px,
         .horizontal_padding_px = horizontal_padding_px,
         .include_drop_shadow = include_drop_shadow,

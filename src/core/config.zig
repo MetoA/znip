@@ -6,6 +6,7 @@ pub const Preset = struct {
     font: []const u8,
     font_size: u32,
     window_controls: bool,
+    show_file_name: bool = true,
     vertical_padding_px: u32,
     horizontal_padding_px: u32,
     include_drop_shadow: bool,
@@ -139,6 +140,7 @@ const preset_default =
 \\  "font": "JetBrainsMono-Bold.ttf",
 \\  "font_size": 16,
 \\  "window_controls": true,
+\\  "show_file_name": true,
 \\  "vertical_padding_px": 50,
 \\  "horizontal_padding_px": 50,
 \\  "include_drop_shadow": true

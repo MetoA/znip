@@ -14,7 +14,12 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var renderer = try Renderer.init(arena_allocator, preset, active_theme);
+    const display_file_name: ?[]const u8 = if (preset.show_file_name and source_hint_path != null)
+        std.fs.path.basename(source_hint_path.?)
+    else
+        null;
+
+    var renderer = try Renderer.init(arena_allocator, preset, active_theme, display_file_name);
     defer renderer.deinit();
 
     var parser = tree_sitter.Parser.init(arena_allocator, source_code, source_hint_path);
@@ -30,6 +35,7 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     renderer.fillBackground();
     try renderer.drawCodeWindow(last_chunk_height);
     renderer.drawCodeWindowControls();
+    renderer.drawFileName();
     try renderer.drawChunks(chunks.items);
     renderer.saveImage(file_name);
 }

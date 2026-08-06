@@ -25,12 +25,14 @@ pub const Renderer = struct {
     preset: Preset,
     active_theme: theme.Theme,
     allocator: std.mem.Allocator,
+    display_file_name: ?[]const u8 = null,
 
-    pub fn init(allocator: std.mem.Allocator, preset: Preset, active_theme: theme.Theme) !Renderer {
+    pub fn init(allocator: std.mem.Allocator, preset: Preset, active_theme: theme.Theme, display_file_name: ?[]const u8) !Renderer {
         var self: Renderer = undefined;
         self.allocator = allocator;
         self.preset = preset;
         self.active_theme = active_theme;
+        self.display_file_name = display_file_name;
 
         _ = c.bl_font_face_init(&self.face);
         errdefer _ = c.bl_font_face_reset(&self.face);
@@ -73,6 +75,7 @@ pub const Renderer = struct {
         const ascent = font_metrics.unnamed_0.unnamed_0.ascent;
         const descent = font_metrics.unnamed_0.unnamed_0.descent;
         const char_width = ascent * 0.6;
+        const header_height: f32 = if (self.preset.window_controls or self.display_file_name != null) 50.0 else 20.0;
 
         return .{
             .ascent = ascent,
@@ -80,7 +83,7 @@ pub const Renderer = struct {
             .line_height = ascent + descent + font_metrics.line_gap,
             .char_width = char_width,
             .margin_x = @as(f32, @floatFromInt(self.preset.horizontal_padding_px)) + 50.0,
-            .margin_y = @as(f32, @floatFromInt(self.preset.vertical_padding_px)) + 50.0,
+            .margin_y = @as(f32, @floatFromInt(self.preset.vertical_padding_px)) + header_height,
         };
     }
 
@@ -266,6 +269,18 @@ pub const Renderer = struct {
             _ = c.bl_context_set_fill_style_rgba32(&self.context, color);
             _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_CIRCLE, &circle);
         }
+    }
+
+    pub fn drawFileName(self: *Renderer) void {
+        const name = self.display_file_name orelse return;
+
+        const pad_x = @as(f64, @floatFromInt(self.preset.horizontal_padding_px));
+        const pad_y = @as(f64, @floatFromInt(self.preset.vertical_padding_px));
+        const start_x = if (self.preset.window_controls) pad_x + 90.0 else pad_x + 25.0;
+        const baseline_y = pad_y + 25.0 + @as(f64, self.fontMetrics().ascent / 4.0);
+
+        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.line_number);
+        _ = c.bl_context_fill_utf8_text_d(&self.context, &c.BLPoint{ .x = start_x, .y = baseline_y }, &self.font, name.ptr, name.len);
     }
 
     // Curved arrow, drawn at the end of the line, indicating wrapping will appear
