@@ -4,6 +4,7 @@ const cli = @import("core/cli.zig");
 const config = znip.config;
 const theme = znip.theme_module;
 const util_files = @import("util/files.zig");
+const util_indent = @import("util/indent.zig");
 const clipboard = @import("clipboard/clipboard.zig");
 const wizard = @import("interactive/wizard.zig");
 
@@ -85,6 +86,12 @@ pub fn main() !void {
             std.log.err("CLIPBOARD READ ERR", .{});
             return;
         };
+    }
+
+    if (code) |c| {
+        const trimmed = try util_indent.trimCommonIndent(allocator, c);
+        allocator.free(c);
+        code = trimmed;
     }
 
     defer if (code) |c| allocator.free(c);
