@@ -40,6 +40,10 @@
             .url = "https://github.com/rockorager/libvaxis/archive/81732720221779056739e5d7fca997c69fb8b751.tar.gz",
             .hash = "vaxis-0.5.1-BWNV_P47CQCCnpaMtUBVjAF_HGVOF0bDSVuf2wc76b7w",
         },
+        .wasmtime = .{
+            .url = "https://github.com/bytecodealliance/wasmtime/releases/download/v36.0.7/wasmtime-v36.0.7-aarch64-macos-c-api.tar.xz",
+            .hash = "N-V-__8AANOT3QIV5Ltus7D_GI_ULJH2Y2UdZVexyET1B_rf",
+        },
     },
     .paths = .{
         "build.zig",

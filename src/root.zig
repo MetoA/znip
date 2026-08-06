@@ -43,3 +43,8 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
 pub fn createRootConfigDirectories(allocator: std.mem.Allocator) !void {
     try root_config.createRootConfigDirectories(allocator);
 }
+
+test {
+    std.testing.refAllDecls(tree_sitter);
+}
+

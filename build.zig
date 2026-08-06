@@ -21,6 +21,15 @@ pub fn build(b: *std.Build) !void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
+    // Enables loading additional Tree-sitter grammars at runtime from WASM,
+    // for languages outside the natively-compiled set above. Off by default:
+    // wasmtime is a large prebuilt binary dependency that meaningfully grows
+    // binary size/link time, so it should only be paid for when opted into.
+    const wasm_enabled = b.option(bool, "wasm", "Enable on-demand WASM grammar loading (requires wasmtime)") orelse false;
+
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "wasm_enabled", wasm_enabled);
+
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -83,6 +92,8 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
+    mod.addImport("build_options", build_options.createModule());
+
     const clap = b.dependency("clap", .{ .target = target, .optimize = optimize });
     exe.root_module.addImport("clap", clap.module("clap"));
 
@@ -115,22 +126,51 @@ pub fn build(b: *std.Build) !void {
     addSourceFilesFromDir(b, exe, "vendor/blend2d/3rdparty/asmjit/asmjit", b2d_flags.items);
     
     // Tree-sitter configuration
-    exe.linkLibC();
-    const ts_flags = [_][]const u8{
+    //
+    // All Tree-sitter/wasmtime sources and libraries are attached to `mod`
+    // only, not `exe.root_module` - `exe` imports `mod` ("znip") and inherits
+    // them transitively. Attaching to both would compile each C source twice
+    // and produce duplicate-symbol link errors whenever a Compile step (like
+    // exe_tests below) ends up depending on both. `mod` is the single source
+    // of truth so that `mod`'s own test binary (`mod_tests`) can also link
+    // and exercise tree_sitter.zig directly.
+    mod.link_libc = true;
+    var ts_flags = std.ArrayList([]const u8).empty;
+    try ts_flags.appendSlice(b.allocator, &.{
         "-std=c11",
         "-D_GNU_SOURCE",             // Fixes le16toh/be16toh
         "-D_POSIX_C_SOURCE=200112L", // Fixes fdopen
         "-D_DEFAULT_SOURCE",         // General compatibility
-    };
-    exe.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
-    exe.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
+    });
     mod.addIncludePath(b.path("vendor/tree-sitter/lib/include"));
     mod.addIncludePath(b.path("vendor/tree-sitter/lib/src"));
-    exe.addCSourceFile(.{
+
+    if (wasm_enabled) {
+        // wasmtime is a prebuilt binary (built from Rust; there is no C
+        // source path), vendored per-host-triple as a build.zig.zon
+        // dependency. This currently only vendors the developer's own host
+        // triple (see build.zig.zon) - cross-compiling to a target without a
+        // matching wasmtime release asset will fail to fetch that dependency.
+        const wasmtime_dep = b.dependency("wasmtime", .{});
+        mod.addIncludePath(wasmtime_dep.path("include"));
+        mod.addLibraryPath(wasmtime_dep.path("lib"));
+        // Prefer the static archive over the dylib: the dylib would only be
+        // locatable at runtime via an rpath into Zig's global package cache,
+        // which doesn't survive distributing the built binary elsewhere.
+        mod.linkSystemLibrary("wasmtime", .{ .preferred_link_mode = .static });
+        // wasm_store.c's `#include "./stdlib-symbols.txt"` is normally
+        // satisfied by tree-sitter's Rust build.rs copying it into OUT_DIR;
+        // here we just point the quoted-include fallback search at its real
+        // vendored location instead.
+        mod.addIncludePath(b.path("vendor/tree-sitter/lib/src/wasm"));
+        try ts_flags.append(b.allocator, "-DTREE_SITTER_FEATURE_WASM");
+    }
+
+    mod.addCSourceFile(.{
         .file = b.path("vendor/tree-sitter/lib/src/lib.c"),
-        .flags = &ts_flags,
+        .flags = ts_flags.items,
     });
-    
+
     const languages = [_][]const u8{ "zig", "rust", "javascript", "typescript", "python", "c", "cpp", "go", "html", "css", "java", "ruby", "php", "json", "markdown", "sql" };
 
     // Some grammar repos nest the actual grammar source below the repo root
@@ -157,7 +197,7 @@ pub fn build(b: *std.Build) !void {
         const parser_c = b.pathJoin(&.{ src_dir, "parser.c" });
 
         if (std.fs.cwd().access(parser_c, .{})) |_| {
-            exe.root_module.addCSourceFile(.{
+            mod.addCSourceFile(.{
                 .file = b.path(parser_c),
                 .flags = &.{ "-I", src_dir, "-std=c11", "-O3" },
             });
@@ -166,12 +206,12 @@ pub fn build(b: *std.Build) !void {
             const scanner_cc = b.pathJoin(&.{ src_dir, "scanner.cc" });
 
             if (hasScanner(scanner_c)) {
-                exe.root_module.addCSourceFile(.{ .file = b.path(scanner_c), .flags = &.{ "-I", src_dir, "-std=c11", "-O3" } });
+                mod.addCSourceFile(.{ .file = b.path(scanner_c), .flags = &.{ "-I", src_dir, "-std=c11", "-O3" } });
             }
 
             if (hasScanner(scanner_cc)) {
-                exe.root_module.addCSourceFile(.{ .file = b.path(scanner_cc), .flags = &.{ "-I", src_dir, "-O3" } });
-                exe.root_module.link_libcpp = true;
+                mod.addCSourceFile(.{ .file = b.path(scanner_cc), .flags = &.{ "-I", src_dir, "-O3" } });
+                mod.link_libcpp = true;
             }
         } else |err| {
             std.log.err("Skipping {s}: parser.c not found in src/ ({s})", .{ language, @errorName(err) });
