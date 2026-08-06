@@ -7,6 +7,7 @@ const Renderer = @import("ui/renderer.zig").Renderer;
 
 pub const config = @import("core/config.zig");
 pub const theme_module = @import("ui/theme.zig");
+pub const fonts_module = @import("util/fonts.zig");
 
 pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8, preset: Preset, active_theme: theme.Theme) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);

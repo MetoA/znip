@@ -5,6 +5,7 @@ const config = znip.config;
 const theme = znip.theme_module;
 const util_files = @import("util/files.zig");
 const clipboard = @import("clipboard/clipboard.zig");
+const wizard = @import("interactive/wizard.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -37,12 +38,24 @@ pub fn main() !void {
     var parsed_config = try config.Config.load(allocator);
     defer parsed_config.deinit();
 
-    const preset_name = cli_config.preset orelse parsed_config.value.active_preset;
+    var wizard_result: ?wizard.Result = null;
+    defer if (wizard_result) |*r| r.deinit(allocator);
 
-    var parsed_preset = try config.Config.loadPreset(allocator, preset_name);
-    defer parsed_preset.deinit();
+    var parsed_preset: ?std.json.Parsed(config.Preset) = null;
+    defer if (parsed_preset) |*p| p.deinit();
 
-    const active_theme = theme.getThemeByName(parsed_preset.value.theme);
+    const active_preset: config.Preset = blk: {
+        if (cli_config.interactive) {
+            wizard_result = try wizard.run(allocator);
+            break :blk wizard_result.?.preset;
+        }
+
+        const preset_name = cli_config.preset orelse parsed_config.value.active_preset;
+        parsed_preset = try config.Config.loadPreset(allocator, preset_name);
+        break :blk parsed_preset.?.value;
+    };
+
+    const active_theme = theme.getThemeByName(active_preset.theme);
 
     var code: ?[:0]u8 = null;
 
@@ -85,7 +98,7 @@ pub fn main() !void {
     defer allocator.free(file_name);
     
     if (code) |c| {
-        try znip.renderImage(c, file_name, cli_config.file_path, parsed_preset.value, active_theme);
+        try znip.renderImage(c, file_name, cli_config.file_path, active_preset, active_theme);
     }
 
     if (cli_config.to_clipboard) {

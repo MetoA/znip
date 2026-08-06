@@ -203,7 +203,7 @@ pub const PaperWhite = Theme {
     },
 };
 
-const builtin_themes = [_]Theme{
+pub const builtin_themes = [_]Theme{
     OneDarker,
     MidnightAurora,
     SolarizedLight,

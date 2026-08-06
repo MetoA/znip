@@ -1,7 +1,7 @@
 const std = @import("std");
 const tree_sitter = @import("../core/tree_sitter.zig");
 const SplitInclusiveIterator = @import("../util/split_inclusive_iterator.zig").SplitInclusiveIterator;
-const fonts = @import("../assets/fonts/fonts.zig");
+const fonts = @import("../util/fonts.zig");
 const Preset = @import("../core/config.zig").Preset;
 const theme = @import("theme.zig");
 const c = @cImport({
@@ -41,7 +41,9 @@ pub const Renderer = struct {
         _ = c.bl_glyph_buffer_init(&self.glyph_buffer);
         errdefer _ = c.bl_glyph_buffer_reset(&self.glyph_buffer);
 
-        if (c.bl_font_data_create_from_data(&self.font_data, fonts.font_jet_brains_mono_bold.ptr, fonts.font_jet_brains_mono_bold.len, null, null) != c.BL_SUCCESS) {
+        const font_bytes = try fonts.loadFontBytes(allocator, self.preset.font);
+
+        if (c.bl_font_data_create_from_data(&self.font_data, font_bytes.ptr, font_bytes.len, null, null) != c.BL_SUCCESS) {
             return error.FontDataCreationFailed;
         }
 
@@ -247,6 +249,8 @@ pub const Renderer = struct {
     }
 
     pub fn drawCodeWindowControls(self: *Renderer) void {
+        if (!self.preset.window_controls) return;
+
         const colors = [_]u32{
             self.active_theme.ui.window_close,
             self.active_theme.ui.window_minimize,

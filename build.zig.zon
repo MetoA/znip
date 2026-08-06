@@ -36,6 +36,10 @@
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.11.0.tar.gz",
             .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
         },
+        .vaxis = .{
+            .url = "https://github.com/rockorager/libvaxis/archive/81732720221779056739e5d7fca997c69fb8b751.tar.gz",
+            .hash = "vaxis-0.5.1-BWNV_P47CQCCnpaMtUBVjAF_HGVOF0bDSVuf2wc76b7w",
+        },
     },
     .paths = .{
         "build.zig",

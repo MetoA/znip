@@ -86,6 +86,9 @@ pub fn build(b: *std.Build) !void {
     const clap = b.dependency("clap", .{ .target = target, .optimize = optimize });
     exe.root_module.addImport("clap", clap.module("clap"));
 
+    const vaxis = b.dependency("vaxis", .{ .target = target, .optimize = optimize });
+    exe.root_module.addImport("vaxis", vaxis.module("vaxis"));
+
     // Blend2D configuration
     exe.linkLibCpp();
     var b2d_flags = std.ArrayList([]const u8).empty;

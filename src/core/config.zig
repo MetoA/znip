@@ -84,6 +84,7 @@ pub fn createRootConfigDirectories(allocator: std.mem.Allocator) !void {
     try createRootDirectory(allocator, ".znip");
     try createRootDirectory(allocator, ".znip/presets");
     try createRootDirectory(allocator, ".znip/themes");
+    try createRootDirectory(allocator, ".znip/fonts");
     try createRootFile(allocator, ".znip/config.json", config_default);
     try createRootFile(allocator, ".znip/presets/default.json", preset_default);
 }
