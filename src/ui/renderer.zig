@@ -126,7 +126,8 @@ pub const Renderer = struct {
 
                 if (chunk.len > 0) {
                     var wordsIterator = SplitInclusiveIterator{ .buffer = chunk, .delimiter = " ", .index = 0 };
-                    while (wordsIterator.next()) |word| {
+                    while (wordsIterator.next()) |raw_word| {
+                        var word = raw_word;
                         var text_metrics: c.BLTextMetrics = undefined;
                         self.calculateTextMetrics(&text_metrics, word);
 
@@ -147,10 +148,12 @@ pub const Renderer = struct {
                                 .y = pen.y,
                                 .color = self.active_theme.getColor(tree_sitter.TokenCategory.default_text),
                             });
-                            pen.advanceX(text_metrics.advance.x);
+
+                            word = std.mem.trimLeft(u8, word, " ");
+                            if (word.len == 0) continue;
+                            self.calculateTextMetrics(&text_metrics, word);
                         }
 
-                        self.calculateTextMetrics(&text_metrics, word);
                         try drawableChunks.append(self.allocator, .{
                             .x = pen.x,
                             .y = pen.y,
