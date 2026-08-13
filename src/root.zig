@@ -1,5 +1,6 @@
 const std = @import("std");
 const tree_sitter = @import("core/tree_sitter.zig");
+const grammar_cache = @import("core/grammar_cache.zig");
 const Preset = @import("core/config.zig").Preset;
 const root_config = @import("core/config.zig");
 const theme = @import("ui/theme.zig");
@@ -48,5 +49,6 @@ pub fn createRootConfigDirectories(allocator: std.mem.Allocator) !void {
 
 test {
     std.testing.refAllDecls(tree_sitter);
+    std.testing.refAllDecls(grammar_cache);
 }
 
