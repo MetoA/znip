@@ -41,7 +41,7 @@ const HighlightsQueryMap = struct {
     pub const zig = @embedFile("../deps/tree-sitter-zig/queries/highlights.scm");
 };
 
-const LanguageId = enum {
+const NativeLanguageId = enum {
     c,
     cpp,
     css,
@@ -60,7 +60,7 @@ const LanguageId = enum {
     zig,
 };
 
-const all_languages = [_]LanguageId{
+const native_languages = [_]NativeLanguageId{
     .zig,
     .rust,
     .javascript,
@@ -79,6 +79,122 @@ const all_languages = [_]LanguageId{
     .sql,
 };
 
+// A Tree-sitter language loaded at runtime from a cached WASM grammar,
+// for languages outside the natively-compiled `NativeLanguageId` set.
+pub const DynamicLanguage = struct {
+    name: []const u8,
+    ts_language: *const c.TSLanguage,
+    highlights_query: []const u8,
+};
+
+// The common currency returned by language detection: either one of the
+// natively-compiled grammars, or one loaded on demand via a LanguageRegistry.
+pub const LanguageRef = union(enum) {
+    native: NativeLanguageId,
+    dynamic: *const DynamicLanguage,
+};
+
+// Owns WASM-loaded grammars for languages outside the native set. The
+// wasmtime engine/store are created lazily on the first cache hit, so the
+// native detection/parse path never touches wasmtime.
+//
+// Intentionally has no deinit(): construct with an arena allocator (as
+// Parser.attachRegistry's caller does) and let the arena's teardown free the
+// name/query buffers and hashmap. The wasm_engine/wasm_store are never
+// explicitly deleted - a real crash was found inside this vendored
+// tree-sitter snapshot's own ts_wasm_store_delete cleanup, independent of how
+// the caller manages lifetimes (see the Phase 2 WASM spike test). Since znip
+// is a short-lived, one-shot CLI process, leaking these for process lifetime
+// is an acceptable stance; revisit if this is ever used in a long-lived process.
+pub const LanguageRegistry = struct {
+    allocator: std.mem.Allocator,
+    wasm_engine: ?*c.TSWasmEngine = null,
+    wasm_store: ?*c.TSWasmStore = null,
+    loaded: std.StringHashMap(DynamicLanguage),
+
+    pub fn init(allocator: std.mem.Allocator) LanguageRegistry {
+        return .{
+            .allocator = allocator,
+            .loaded = std.StringHashMap(DynamicLanguage).init(allocator),
+        };
+    }
+
+    // Returns an already-loaded entry, or tries to load
+    // <home>/.znip/grammars/<name>/{grammar.wasm,highlights.scm} from disk.
+    // Returns null (not an error) if no cached grammar exists for `name`.
+    pub fn resolve(self: *LanguageRegistry, name: []const u8) !?*const DynamicLanguage {
+        // ts_wasm_store_new/ts_wasm_store_load_language have no fallback
+        // stub in the vendored tree-sitter source when TREE_SITTER_FEATURE_WASM
+        // is undefined (unlike most other ts_wasm_store_* functions) - so
+        // this whole body must stay unreached (not just error out at
+        // runtime) in non-wasm builds, or the default build fails to link.
+        if (comptime !build_options.wasm_enabled) return null;
+
+        if (self.loaded.getPtr(name)) |existing| return existing;
+
+        const home = std.process.getEnvVarOwned(self.allocator, "HOME") catch return null;
+        defer self.allocator.free(home);
+
+        const dir_path = try std.fs.path.join(self.allocator, &.{ home, ".znip", "grammars", name });
+        defer self.allocator.free(dir_path);
+
+        const wasm_path = try std.fs.path.join(self.allocator, &.{ dir_path, "grammar.wasm" });
+        defer self.allocator.free(wasm_path);
+        const query_path = try std.fs.path.join(self.allocator, &.{ dir_path, "highlights.scm" });
+        defer self.allocator.free(query_path);
+
+        const wasm_bytes = std.fs.cwd().readFileAlloc(self.allocator, wasm_path, 16 * 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        defer self.allocator.free(wasm_bytes);
+
+        const query_source = std.fs.cwd().readFileAlloc(self.allocator, query_path, 4 * 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        errdefer self.allocator.free(query_source);
+
+        const store = try self.ensureWasmStore();
+
+        var wasm_err: c.TSWasmError = undefined;
+        const ts_language = c.ts_wasm_store_load_language(store, name.ptr, wasm_bytes.ptr, @intCast(wasm_bytes.len), &wasm_err) orelse {
+            std.log.err("ts_wasm_store_load_language failed for '{s}': kind={d} message={s}", .{ name, wasm_err.kind, wasm_err.message });
+            self.allocator.free(query_source);
+            return error.WasmLanguageLoadFailed;
+        };
+
+        const owned_name = try self.allocator.dupe(u8, name);
+        try self.loaded.put(owned_name, .{
+            .name = owned_name,
+            .ts_language = ts_language,
+            .highlights_query = query_source,
+        });
+
+        return self.loaded.getPtr(owned_name);
+    }
+
+    fn ensureWasmStore(self: *LanguageRegistry) !*c.TSWasmStore {
+        if (self.wasm_store) |store| return store;
+
+        // wasm_engine_new comes from wasmtime's wasm.h, only cImported when
+        // built with -Dwasm=true (see the top of this file) - gate this
+        // whole branch on that so the default build never references it.
+        if (comptime !build_options.wasm_enabled) return error.WasmSupportNotBuilt;
+
+        const engine = self.wasm_engine orelse c.wasm_engine_new() orelse return error.WasmEngineInitFailed;
+        self.wasm_engine = engine;
+
+        var wasm_err: c.TSWasmError = undefined;
+        const store = c.ts_wasm_store_new(engine, &wasm_err) orelse {
+            std.log.err("ts_wasm_store_new failed: kind={d} message={s}", .{ wasm_err.kind, wasm_err.message });
+            return error.WasmStoreInitFailed;
+        };
+        self.wasm_store = store;
+        return store;
+    }
+};
+
 const TreeStats = struct {
     total_nodes: u32 = 0,
     named_nodes: u32 = 0,
@@ -92,6 +208,7 @@ pub const Parser = struct {
     source_code: []const u8,
     allocator: std.mem.Allocator,
     source_hint_path: ?[]const u8,
+    registry: ?*LanguageRegistry,
 
     const max_detection_bytes = 16 * 1024;
 
@@ -100,8 +217,16 @@ pub const Parser = struct {
         self.allocator = allocator;
         self.source_code = source_code;
         self.source_hint_path = source_hint_path;
+        self.registry = null;
 
         return self;
+    }
+
+    // Opts this parser into the on-demand WASM fallback for languages
+    // outside the native set. Optional: callers that don't attach a
+    // registry get exactly today's native-only detection behavior.
+    pub fn attachRegistry(self: *Parser, registry: *LanguageRegistry) void {
+        self.registry = registry;
     }
 
     pub fn sourceCodeMatches(self: *Parser) !std.ArrayList(Match) {
@@ -113,6 +238,9 @@ pub const Parser = struct {
         const parser = c.ts_parser_new() orelse return error.ParserInitFailed;
         defer c.ts_parser_delete(parser);
 
+        if (detected_language == .dynamic) {
+            c.ts_parser_set_wasm_store(parser, self.registry.?.wasm_store.?);
+        }
         _ = c.ts_parser_set_language(parser, lang);
 
         const tree = c.ts_parser_parse_string(parser, null, self.source_code.ptr, @intCast(self.source_code.len)) orelse return error.ParseFailed;
@@ -168,32 +296,48 @@ pub const Parser = struct {
         return matches;
     }
 
-    fn detectLanguage(self: *Parser) !LanguageId {
+    fn detectLanguage(self: *Parser) !LanguageRef {
         const source = if (self.source_code.len > max_detection_bytes) self.source_code[0..max_detection_bytes] else self.source_code;
-        if (std.mem.trim(u8, source, " \t\r\n").len == 0) return .zig;
+        if (std.mem.trim(u8, source, " \t\r\n").len == 0) return .{ .native = .zig };
 
         const extension_lang = if (self.source_hint_path) |hint| detectLanguageFromPath(hint) else null;
         const fence_lang = detectLanguageFromFence(source);
         const shebang_lang = detectLanguageFromShebang(source);
 
-        var candidates = std.ArrayList(LanguageId).empty;
+        // No native signal at all for this input - before falling back to
+        // scoring against every native grammar (which bottoms out at .zig),
+        // see if an on-demand WASM grammar is already cached for whatever
+        // raw name the extension/fence tag suggests.
+        if (extension_lang == null and fence_lang == null) {
+            if (self.registry) |registry| {
+                const path_ext_name = if (self.source_hint_path) |hint| rawExtensionName(hint) else null;
+                const raw_name = path_ext_name orelse extractFenceTag(source);
+                if (raw_name) |name| {
+                    if (try registry.resolve(name)) |dynamic| {
+                        return .{ .dynamic = dynamic };
+                    }
+                }
+            }
+        }
+
+        var candidates = std.ArrayList(NativeLanguageId).empty;
         defer candidates.deinit(self.allocator);
 
         if (extension_lang) |lang| try appendCandidate(self.allocator, &candidates, lang);
         if (fence_lang) |lang| try appendCandidate(self.allocator, &candidates, lang);
         if (shebang_lang) |lang| try appendCandidate(self.allocator, &candidates, lang);
-        for (all_languages) |lang| {
+        for (native_languages) |lang| {
             try appendCandidate(self.allocator, &candidates, lang);
         }
 
         const parser = c.ts_parser_new() orelse return error.ParserInitFailed;
         defer c.ts_parser_delete(parser);
 
-        var best_lang: LanguageId = extension_lang orelse fence_lang orelse shebang_lang orelse .zig;
+        var best_lang: NativeLanguageId = extension_lang orelse fence_lang orelse shebang_lang orelse .zig;
         var best_score: f64 = -1e9;
 
         for (candidates.items) |candidate| {
-            _ = c.ts_parser_set_language(parser, languagePtr(candidate));
+            _ = c.ts_parser_set_language(parser, nativeLanguagePtr(candidate));
             const tree = c.ts_parser_parse_string(parser, null, source.ptr, @intCast(source.len)) orelse continue;
             defer c.ts_tree_delete(tree);
 
@@ -212,17 +356,17 @@ pub const Parser = struct {
             }
         }
 
-        return best_lang;
+        return .{ .native = best_lang };
     }
 
-    fn appendCandidate(allocator: std.mem.Allocator, candidates: *std.ArrayList(LanguageId), lang: LanguageId) !void {
+    fn appendCandidate(allocator: std.mem.Allocator, candidates: *std.ArrayList(NativeLanguageId), lang: NativeLanguageId) !void {
         for (candidates.items) |existing| {
             if (existing == lang) return;
         }
         try candidates.append(allocator, lang);
     }
 
-    fn detectLanguageFromPath(path: []const u8) ?LanguageId {
+    fn detectLanguageFromPath(path: []const u8) ?NativeLanguageId {
         const ext = std.fs.path.extension(path);
         if (ext.len == 0) return null;
 
@@ -245,17 +389,34 @@ pub const Parser = struct {
         return null;
     }
 
-    fn detectLanguageFromFence(source: []const u8) ?LanguageId {
+    fn detectLanguageFromFence(source: []const u8) ?NativeLanguageId {
+        const tag = extractFenceTag(source) orelse return null;
+        return languageFromHint(tag);
+    }
+
+    // The raw ```tag string from a fenced code block, if any - used as a
+    // dynamic-language lookup name when the tag doesn't match any native
+    // language.
+    fn extractFenceTag(source: []const u8) ?[]const u8 {
         const first_newline = std.mem.indexOfScalar(u8, source, '\n') orelse source.len;
         const first_line = std.mem.trim(u8, source[0..first_newline], " \t\r");
         if (!std.mem.startsWith(u8, first_line, "```")) return null;
 
         const tag = std.mem.trim(u8, first_line[3..], " \t\r");
         if (tag.len == 0) return null;
-        return languageFromHint(tag);
+        return tag;
     }
 
-    fn detectLanguageFromShebang(source: []const u8) ?LanguageId {
+    // The file extension with its leading dot stripped, if any - used as a
+    // dynamic-language lookup name when the extension doesn't match any
+    // native language (e.g. ".cob" -> "cob").
+    fn rawExtensionName(path: []const u8) ?[]const u8 {
+        const ext = std.fs.path.extension(path);
+        if (ext.len <= 1) return null;
+        return ext[1..];
+    }
+
+    fn detectLanguageFromShebang(source: []const u8) ?NativeLanguageId {
         const first_newline = std.mem.indexOfScalar(u8, source, '\n') orelse source.len;
         const first_line = std.mem.trim(u8, source[0..first_newline], " \t\r");
         if (!std.mem.startsWith(u8, first_line, "#!")) return null;
@@ -266,7 +427,7 @@ pub const Parser = struct {
         return null;
     }
 
-    fn languageFromHint(hint: []const u8) ?LanguageId {
+    fn languageFromHint(hint: []const u8) ?NativeLanguageId {
         if (eqIgnoreCase(hint, "zig")) return .zig;
         if (eqIgnoreCase(hint, "rust") or eqIgnoreCase(hint, "rs")) return .rust;
         if (eqIgnoreCase(hint, "python") or eqIgnoreCase(hint, "py")) return .python;
@@ -319,7 +480,28 @@ pub const Parser = struct {
         return score;
     }
 
-    fn languagePtr(language: LanguageId) *c.TSLanguage {
+    fn languagePtr(language: LanguageRef) *const c.TSLanguage {
+        return switch (language) {
+            .native => |n| nativeLanguagePtr(n),
+            .dynamic => |d| d.ts_language,
+        };
+    }
+
+    fn highlightsQuerySource(language: LanguageRef) []const u8 {
+        return switch (language) {
+            .native => |n| nativeHighlightsQuerySource(n),
+            .dynamic => |d| d.highlights_query,
+        };
+    }
+
+    fn languageName(language: LanguageRef) []const u8 {
+        return switch (language) {
+            .native => |n| nativeLanguageName(n),
+            .dynamic => |d| d.name,
+        };
+    }
+
+    fn nativeLanguagePtr(language: NativeLanguageId) *c.TSLanguage {
         return switch (language) {
             .c => tree_sitter_c(),
             .cpp => tree_sitter_cpp(),
@@ -340,7 +522,7 @@ pub const Parser = struct {
         };
     }
 
-    fn highlightsQuerySource(language: LanguageId) []const u8 {
+    fn nativeHighlightsQuerySource(language: NativeLanguageId) []const u8 {
         return switch (language) {
             .c => HighlightsQueryMap.c,
             .cpp => HighlightsQueryMap.cpp,
@@ -361,7 +543,7 @@ pub const Parser = struct {
         };
     }
 
-    fn languageName(language: LanguageId) []const u8 {
+    fn nativeLanguageName(language: NativeLanguageId) []const u8 {
         return switch (language) {
             .c => "c",
             .cpp => "cpp",

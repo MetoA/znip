@@ -23,6 +23,8 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     defer renderer.deinit();
 
     var parser = tree_sitter.Parser.init(arena_allocator, source_code, source_hint_path);
+    var registry = tree_sitter.LanguageRegistry.init(arena_allocator);
+    parser.attachRegistry(&registry);
 
     var matches = try parser.sourceCodeMatches();
     defer matches.deinit(arena_allocator);
