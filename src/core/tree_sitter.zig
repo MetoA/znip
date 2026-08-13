@@ -79,6 +79,39 @@ const native_languages = [_]NativeLanguageId{
     .sql,
 };
 
+// The file extension with its leading dot stripped, if any - used as a
+// dynamic-language lookup name when the extension doesn't match any native
+// language (e.g. ".cob" -> "cob").
+pub fn candidateNameFromPath(path: []const u8) ?[]const u8 {
+    const ext = std.fs.path.extension(path);
+    if (ext.len <= 1) return null;
+    return ext[1..];
+}
+
+pub fn nativeLanguageFromHint(hint: []const u8) ?NativeLanguageId {
+    if (eqIgnoreCase(hint, "zig")) return .zig;
+    if (eqIgnoreCase(hint, "rust") or eqIgnoreCase(hint, "rs")) return .rust;
+    if (eqIgnoreCase(hint, "python") or eqIgnoreCase(hint, "py")) return .python;
+    if (eqIgnoreCase(hint, "javascript") or eqIgnoreCase(hint, "js") or eqIgnoreCase(hint, "jsx")) return .javascript;
+    if (eqIgnoreCase(hint, "typescript") or eqIgnoreCase(hint, "ts") or eqIgnoreCase(hint, "tsx")) return .typescript;
+    if (eqIgnoreCase(hint, "c")) return .c;
+    if (eqIgnoreCase(hint, "cpp") or eqIgnoreCase(hint, "c++") or eqIgnoreCase(hint, "cc") or eqIgnoreCase(hint, "cxx")) return .cpp;
+    if (eqIgnoreCase(hint, "go") or eqIgnoreCase(hint, "golang")) return .go;
+    if (eqIgnoreCase(hint, "html")) return .html;
+    if (eqIgnoreCase(hint, "css")) return .css;
+    if (eqIgnoreCase(hint, "java")) return .java;
+    if (eqIgnoreCase(hint, "ruby") or eqIgnoreCase(hint, "rb")) return .ruby;
+    if (eqIgnoreCase(hint, "json")) return .json;
+    if (eqIgnoreCase(hint, "php")) return .php;
+    if (eqIgnoreCase(hint, "markdown") or eqIgnoreCase(hint, "md")) return .markdown;
+    if (eqIgnoreCase(hint, "sql")) return .sql;
+    return null;
+}
+
+fn eqIgnoreCase(lhs: []const u8, rhs: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(lhs, rhs);
+}
+
 // A Tree-sitter language loaded at runtime from a cached WASM grammar,
 // for languages outside the natively-compiled `NativeLanguageId` set.
 pub const DynamicLanguage = struct {
@@ -119,9 +152,13 @@ pub const LanguageRegistry = struct {
         };
     }
 
-    // Returns an already-loaded entry, or tries to load
-    // <home>/.znip/grammars/<name>/{grammar.wasm,highlights.scm} from disk.
-    // Returns null (not an error) if no cached grammar exists for `name`.
+    // Returns an already-loaded entry, or tries to load one from disk.
+    // Tries <home>/.znip/grammars/<name>/ directly first (the common case:
+    // `name` is already the grammar's canonical name); if that doesn't
+    // exist, scans sibling cache directories for one whose meta.json lists
+    // `name` as one of its extensions (e.g. a lookup for "cob" finding a
+    // grammar cached under "cobol"). Returns null (not an error) if nothing
+    // matches either way.
     pub fn resolve(self: *LanguageRegistry, name: []const u8) !?*const DynamicLanguage {
         // ts_wasm_store_new/ts_wasm_store_load_language have no fallback
         // stub in the vendored tree-sitter source when TREE_SITTER_FEATURE_WASM
@@ -135,7 +172,27 @@ pub const LanguageRegistry = struct {
         const home = std.process.getEnvVarOwned(self.allocator, "HOME") catch return null;
         defer self.allocator.free(home);
 
-        const dir_path = try std.fs.path.join(self.allocator, &.{ home, ".znip", "grammars", name });
+        const grammars_dir = try std.fs.path.join(self.allocator, &.{ home, ".znip", "grammars" });
+        defer self.allocator.free(grammars_dir);
+
+        if (try self.loadFromDir(grammars_dir, name, name)) |dynamic| return dynamic;
+
+        if (try self.findCanonicalNameByExtension(grammars_dir, name)) |canonical_name| {
+            defer self.allocator.free(canonical_name);
+            return try self.loadFromDir(grammars_dir, canonical_name, name);
+        }
+
+        return null;
+    }
+
+    // Loads <grammars_dir>/<dir_name>/{grammar.wasm,highlights.scm}, if
+    // present, and registers it in `self.loaded` under `register_as` (so a
+    // lookup by an alias like "cob" hits the fast in-memory path on repeat
+    // calls within this process). `dir_name` is what's passed to
+    // ts_wasm_store_load_language, since that must match the grammar's
+    // actual exported tree_sitter_<dir_name> function.
+    fn loadFromDir(self: *LanguageRegistry, grammars_dir: []const u8, dir_name: []const u8, register_as: []const u8) !?*const DynamicLanguage {
+        const dir_path = try std.fs.path.join(self.allocator, &.{ grammars_dir, dir_name });
         defer self.allocator.free(dir_path);
 
         const wasm_path = try std.fs.path.join(self.allocator, &.{ dir_path, "grammar.wasm" });
@@ -158,20 +215,58 @@ pub const LanguageRegistry = struct {
         const store = try self.ensureWasmStore();
 
         var wasm_err: c.TSWasmError = undefined;
-        const ts_language = c.ts_wasm_store_load_language(store, name.ptr, wasm_bytes.ptr, @intCast(wasm_bytes.len), &wasm_err) orelse {
-            std.log.err("ts_wasm_store_load_language failed for '{s}': kind={d} message={s}", .{ name, wasm_err.kind, wasm_err.message });
+        const ts_language = c.ts_wasm_store_load_language(store, dir_name.ptr, wasm_bytes.ptr, @intCast(wasm_bytes.len), &wasm_err) orelse {
+            std.log.err("ts_wasm_store_load_language failed for '{s}': kind={d} message={s}", .{ dir_name, wasm_err.kind, wasm_err.message });
             self.allocator.free(query_source);
             return error.WasmLanguageLoadFailed;
         };
 
-        const owned_name = try self.allocator.dupe(u8, name);
-        try self.loaded.put(owned_name, .{
-            .name = owned_name,
+        const owned_register_key = try self.allocator.dupe(u8, register_as);
+        const owned_display_name = try self.allocator.dupe(u8, dir_name);
+        try self.loaded.put(owned_register_key, .{
+            .name = owned_display_name,
             .ts_language = ts_language,
             .highlights_query = query_source,
         });
 
-        return self.loaded.getPtr(owned_name);
+        return self.loaded.getPtr(owned_register_key);
+    }
+
+    const CachedGrammarMeta = struct {
+        extensions: []const []const u8 = &.{},
+    };
+
+    // Scans immediate subdirectories of `grammars_dir` for one whose
+    // meta.json (written by grammar_cache.fetchGrammar) lists `name` as one
+    // of its extensions. Returns the subdirectory's (canonical) name if
+    // found - caller owns the returned slice.
+    fn findCanonicalNameByExtension(self: *LanguageRegistry, grammars_dir: []const u8, name: []const u8) !?[]const u8 {
+        var dir = std.fs.cwd().openDir(grammars_dir, .{ .iterate = true }) catch return null;
+        defer dir.close();
+
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            if (std.ascii.eqlIgnoreCase(entry.name, name)) continue; // already tried directly
+
+            const meta_path = try std.fs.path.join(self.allocator, &.{ grammars_dir, entry.name, "meta.json" });
+            defer self.allocator.free(meta_path);
+
+            const meta_bytes = std.fs.cwd().readFileAlloc(self.allocator, meta_path, 64 * 1024) catch continue;
+            defer self.allocator.free(meta_bytes);
+
+            var parsed = std.json.parseFromSlice(CachedGrammarMeta, self.allocator, meta_bytes, .{ .allocate = .alloc_always }) catch continue;
+            defer parsed.deinit();
+
+            for (parsed.value.extensions) |ext| {
+                const bare = if (std.mem.startsWith(u8, ext, ".")) ext[1..] else ext;
+                if (std.ascii.eqlIgnoreCase(bare, name)) {
+                    return try self.allocator.dupe(u8, entry.name);
+                }
+            }
+        }
+
+        return null;
     }
 
     fn ensureWasmStore(self: *LanguageRegistry) !*c.TSWasmStore {
@@ -209,6 +304,7 @@ pub const Parser = struct {
     allocator: std.mem.Allocator,
     source_hint_path: ?[]const u8,
     registry: ?*LanguageRegistry,
+    requested_lang: ?[]const u8,
 
     const max_detection_bytes = 16 * 1024;
 
@@ -218,6 +314,7 @@ pub const Parser = struct {
         self.source_code = source_code;
         self.source_hint_path = source_hint_path;
         self.registry = null;
+        self.requested_lang = null;
 
         return self;
     }
@@ -227,6 +324,15 @@ pub const Parser = struct {
     // registry get exactly today's native-only detection behavior.
     pub fn attachRegistry(self: *Parser, registry: *LanguageRegistry) void {
         self.registry = registry;
+    }
+
+    // Explicit language override (e.g. from --lang): bypasses heuristic
+    // detection entirely. Resolves against the native set first, then a
+    // cached dynamic grammar (if a registry is attached); errors loudly with
+    // error.LanguageNotAvailable if neither resolves, unlike the automatic
+    // detection path which silently falls back to heuristic scoring.
+    pub fn setRequestedLanguage(self: *Parser, name: []const u8) void {
+        self.requested_lang = name;
     }
 
     pub fn sourceCodeMatches(self: *Parser) !std.ArrayList(Match) {
@@ -297,6 +403,14 @@ pub const Parser = struct {
     }
 
     fn detectLanguage(self: *Parser) !LanguageRef {
+        if (self.requested_lang) |name| {
+            if (nativeLanguageFromHint(name)) |native| return .{ .native = native };
+            if (self.registry) |registry| {
+                if (try registry.resolve(name)) |dynamic| return .{ .dynamic = dynamic };
+            }
+            return error.LanguageNotAvailable;
+        }
+
         const source = if (self.source_code.len > max_detection_bytes) self.source_code[0..max_detection_bytes] else self.source_code;
         if (std.mem.trim(u8, source, " \t\r\n").len == 0) return .{ .native = .zig };
 
@@ -310,7 +424,7 @@ pub const Parser = struct {
         // raw name the extension/fence tag suggests.
         if (extension_lang == null and fence_lang == null) {
             if (self.registry) |registry| {
-                const path_ext_name = if (self.source_hint_path) |hint| rawExtensionName(hint) else null;
+                const path_ext_name = if (self.source_hint_path) |hint| candidateNameFromPath(hint) else null;
                 const raw_name = path_ext_name orelse extractFenceTag(source);
                 if (raw_name) |name| {
                     if (try registry.resolve(name)) |dynamic| {
@@ -391,7 +505,7 @@ pub const Parser = struct {
 
     fn detectLanguageFromFence(source: []const u8) ?NativeLanguageId {
         const tag = extractFenceTag(source) orelse return null;
-        return languageFromHint(tag);
+        return nativeLanguageFromHint(tag);
     }
 
     // The raw ```tag string from a fenced code block, if any - used as a
@@ -407,15 +521,6 @@ pub const Parser = struct {
         return tag;
     }
 
-    // The file extension with its leading dot stripped, if any - used as a
-    // dynamic-language lookup name when the extension doesn't match any
-    // native language (e.g. ".cob" -> "cob").
-    fn rawExtensionName(path: []const u8) ?[]const u8 {
-        const ext = std.fs.path.extension(path);
-        if (ext.len <= 1) return null;
-        return ext[1..];
-    }
-
     fn detectLanguageFromShebang(source: []const u8) ?NativeLanguageId {
         const first_newline = std.mem.indexOfScalar(u8, source, '\n') orelse source.len;
         const first_line = std.mem.trim(u8, source[0..first_newline], " \t\r");
@@ -424,26 +529,6 @@ pub const Parser = struct {
         if (containsIgnoreCase(first_line, "python")) return .python;
         if (containsIgnoreCase(first_line, "ruby")) return .ruby;
         if (containsIgnoreCase(first_line, "node") or containsIgnoreCase(first_line, "deno") or containsIgnoreCase(first_line, "bun")) return .javascript;
-        return null;
-    }
-
-    fn languageFromHint(hint: []const u8) ?NativeLanguageId {
-        if (eqIgnoreCase(hint, "zig")) return .zig;
-        if (eqIgnoreCase(hint, "rust") or eqIgnoreCase(hint, "rs")) return .rust;
-        if (eqIgnoreCase(hint, "python") or eqIgnoreCase(hint, "py")) return .python;
-        if (eqIgnoreCase(hint, "javascript") or eqIgnoreCase(hint, "js") or eqIgnoreCase(hint, "jsx")) return .javascript;
-        if (eqIgnoreCase(hint, "typescript") or eqIgnoreCase(hint, "ts") or eqIgnoreCase(hint, "tsx")) return .typescript;
-        if (eqIgnoreCase(hint, "c")) return .c;
-        if (eqIgnoreCase(hint, "cpp") or eqIgnoreCase(hint, "c++") or eqIgnoreCase(hint, "cc") or eqIgnoreCase(hint, "cxx")) return .cpp;
-        if (eqIgnoreCase(hint, "go") or eqIgnoreCase(hint, "golang")) return .go;
-        if (eqIgnoreCase(hint, "html")) return .html;
-        if (eqIgnoreCase(hint, "css")) return .css;
-        if (eqIgnoreCase(hint, "java")) return .java;
-        if (eqIgnoreCase(hint, "ruby") or eqIgnoreCase(hint, "rb")) return .ruby;
-        if (eqIgnoreCase(hint, "json")) return .json;
-        if (eqIgnoreCase(hint, "php")) return .php;
-        if (eqIgnoreCase(hint, "markdown") or eqIgnoreCase(hint, "md")) return .markdown;
-        if (eqIgnoreCase(hint, "sql")) return .sql;
         return null;
     }
 
@@ -565,10 +650,6 @@ pub const Parser = struct {
     }
 
     fn eqExt(lhs: []const u8, rhs: []const u8) bool {
-        return std.ascii.eqlIgnoreCase(lhs, rhs);
-    }
-
-    fn eqIgnoreCase(lhs: []const u8, rhs: []const u8) bool {
         return std.ascii.eqlIgnoreCase(lhs, rhs);
     }
 

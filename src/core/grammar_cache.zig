@@ -3,7 +3,7 @@ const std = @import("std");
 // Placeholder znip-controlled release feed - real hosting is a Phase 6
 // concern (a separate build/release pipeline for grammar assets); this is
 // trivially swappable once that exists.
-pub const default_manifest_url = "https://github.com/znip-project/znip-grammars/releases/latest/download/manifest.json";
+pub const default_manifest_url = "https://github.com/MetoA/znip_grammars/releases/download/latest/manifest.json";
 
 pub const GrammarManifestEntry = struct {
     name: []const u8,
@@ -29,12 +29,25 @@ pub fn fetchManifest(allocator: std.mem.Allocator, client: *std.http.Client, url
     };
 }
 
-// Looks up `name` in a parsed manifest; null if not listed.
+// Looks up `name` in a parsed manifest, matching either the entry's
+// canonical name or one of its declared extensions - e.g. a lookup for
+// "cob" (from a .cob file) finds the "cobol" entry via its
+// extensions: [".cob", ".cbl"] list. Both name and extension matching are
+// case-insensitive (real-world COBOL files are often named PROGRAM.COB).
 pub fn findEntry(manifest: GrammarManifest, name: []const u8) ?GrammarManifestEntry {
     for (manifest.languages) |entry| {
-        if (std.mem.eql(u8, entry.name, name)) return entry;
+        if (std.ascii.eqlIgnoreCase(entry.name, name)) return entry;
+        if (extensionMatches(entry.extensions, name)) return entry;
     }
     return null;
+}
+
+fn extensionMatches(extensions: []const []const u8, name: []const u8) bool {
+    for (extensions) |ext| {
+        const bare = if (std.mem.startsWith(u8, ext, ".")) ext[1..] else ext;
+        if (std.ascii.eqlIgnoreCase(bare, name)) return true;
+    }
+    return false;
 }
 
 // Downloads both assets for `entry`, verifies sha256 against the manifest's
@@ -61,6 +74,15 @@ pub fn fetchGrammar(allocator: std.mem.Allocator, client: *std.http.Client, entr
 
     try writeFileAtomic(allocator, dir_path, "grammar.wasm", wasm_bytes);
     try writeFileAtomic(allocator, dir_path, "highlights.scm", highlights_bytes);
+
+    // A small sidecar recording this entry's extensions, so a later lookup
+    // by a different alias (e.g. ".cbl" after this was cached via ".cob")
+    // can find this same cache directory purely from disk, without needing
+    // to re-fetch or re-consult the manifest. See LanguageRegistry.resolve's
+    // extension-alias scan in tree_sitter.zig.
+    const meta_json = try std.json.Stringify.valueAlloc(allocator, .{ .extensions = entry.extensions }, .{});
+    defer allocator.free(meta_json);
+    try writeFileAtomic(allocator, dir_path, "meta.json", meta_json);
 }
 
 fn fetchBody(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, max_len: usize) ![]u8 {
@@ -124,6 +146,29 @@ test "findEntry locates a listed language and misses an unlisted one" {
     const found = findEntry(manifest, "cobol") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("1.0.0", found.version);
     try std.testing.expect(findEntry(manifest, "fortran") == null);
+}
+
+test "findEntry matches by extension alias, case-insensitively" {
+    const manifest = GrammarManifest{
+        .manifest_version = 1,
+        .languages = &.{
+            .{
+                .name = "cobol",
+                .version = "1.0.0",
+                .wasm_url = "https://example.com/cobol.wasm",
+                .highlights_url = "https://example.com/cobol.scm",
+                .extensions = &.{ ".cob", ".cbl" },
+                .sha256_wasm = "aa",
+                .sha256_highlights = "bb",
+            },
+        },
+    };
+
+    try std.testing.expectEqualStrings("cobol", (findEntry(manifest, "cob") orelse return error.TestUnexpectedResult).name);
+    try std.testing.expectEqualStrings("cobol", (findEntry(manifest, "cbl") orelse return error.TestUnexpectedResult).name);
+    try std.testing.expectEqualStrings("cobol", (findEntry(manifest, "COB") orelse return error.TestUnexpectedResult).name);
+    try std.testing.expectEqualStrings("cobol", (findEntry(manifest, "COBOL") orelse return error.TestUnexpectedResult).name);
+    try std.testing.expect(findEntry(manifest, "cbx") == null);
 }
 
 test "verifySha256 accepts a matching digest and rejects a mismatched one" {

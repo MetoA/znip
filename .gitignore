@@ -6,3 +6,6 @@ zig-out/
 
 # Ignore the test output files
 znip_output_*.png
+
+# Ignore the test code files
+/test_code_files/
