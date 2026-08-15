@@ -22,10 +22,11 @@ pub fn build(b: *std.Build) !void {
     // in this directory.
 
     // Enables loading additional Tree-sitter grammars at runtime from WASM,
-    // for languages outside the natively-compiled set above. Off by default:
-    // wasmtime is a large prebuilt binary dependency that meaningfully grows
-    // binary size/link time, so it should only be paid for when opted into.
-    const wasm_enabled = b.option(bool, "wasm", "Enable on-demand WASM grammar loading (requires wasmtime)") orelse false;
+    // for languages outside the natively-compiled set above. On by default
+    // so on-demand languages just work out of the box; pass -Dwasm=false to
+    // opt out (e.g. for a smaller binary, or a target with no vendored
+    // wasmtime dependency - see build.zig.zon).
+    const wasm_enabled = b.option(bool, "wasm", "Enable on-demand WASM grammar loading (requires wasmtime)") orelse true;
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "wasm_enabled", wasm_enabled);

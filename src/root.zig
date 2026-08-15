@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const tree_sitter = @import("core/tree_sitter.zig");
 const grammar_cache = @import("core/grammar_cache.zig");
 const Preset = @import("core/config.zig").Preset;
@@ -32,12 +33,19 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     // checking the manifest for names that already look unrecognized (native
     // extension/fence-tag lookups keep working exactly as before, with zero
     // network activity for the common case).
-    const candidate = requested_lang orelse
-        if (source_hint_path) |p| tree_sitter.candidateNameFromPath(p) else null;
+    //
+    // Gated on wasm_enabled: a build without WASM support can never actually
+    // load a fetched grammar (LanguageRegistry.resolve() is comptime-compiled
+    // to always return null), so prompting/downloading one would just be a
+    // pointless network round-trip that silently goes nowhere.
+    if (comptime build_options.wasm_enabled) {
+        const candidate = requested_lang orelse
+            if (source_hint_path) |p| tree_sitter.candidateNameFromPath(p) else null;
 
-    if (candidate) |name| {
-        if (tree_sitter.nativeLanguageFromHint(name) == null and try registry.resolve(name) == null) {
-            maybeFetchDynamicLanguage(arena_allocator, name, auto_confirm);
+        if (candidate) |name| {
+            if (tree_sitter.nativeLanguageFromHint(name) == null and try registry.resolve(name) == null) {
+                maybeFetchDynamicLanguage(arena_allocator, name, auto_confirm);
+            }
         }
     }
 
@@ -64,7 +72,15 @@ pub fn createRootConfigDirectories(allocator: std.mem.Allocator) !void {
 // Explicit, one-shot install (--install-lang): fetches the manifest, looks
 // up `name`, and fetches+caches its grammar bundle. No prompt - the caller
 // already asked explicitly.
-pub fn installLanguage(allocator: std.mem.Allocator, name: []const u8) !void {
+// Explicit `anyerror` return: the WasmSupportNotBuilt early-return below
+// makes the rest of this function's body unreachable (and its errors
+// pruned from the inferred set) when built with -Dwasm=false - an inferred
+// `!void` would silently shrink to just {WasmSupportNotBuilt} in that
+// config, breaking main.zig's switch on error.LanguageNotInManifest, which
+// is only reachable in the wasm-enabled config.
+pub fn installLanguage(allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    if (comptime !build_options.wasm_enabled) return error.WasmSupportNotBuilt;
+
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
