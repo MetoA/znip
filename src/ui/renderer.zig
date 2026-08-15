@@ -8,7 +8,10 @@ const c = @cImport({
     @cInclude("blend2d/blend2d.h");
 });
 
-const code_window_max_width: f64 = 700.0;
+const code_window_min_width: f64 = 320.0;
+const code_window_max_width: f64 = 900.0;
+const code_window_right_slack: f64 = 30.0; // matches the previous 700 vs 720 gap
+const code_window_gutter_width: f64 = 50.0; // matches the existing +50.0 in margin_x
 const code_window_radius: f64 = 12.0;
 const box_shadow_offset_x: f64 = 0.0;
 const box_shadow_offset_y: f64 = 5.0;
@@ -27,6 +30,7 @@ pub const Renderer = struct {
     active_theme: theme.Theme,
     allocator: std.mem.Allocator,
     display_file_name: ?[]const u8 = null,
+    content_width: f64 = code_window_min_width,
 
     pub fn init(allocator: std.mem.Allocator, preset: Preset, active_theme: theme.Theme, display_file_name: ?[]const u8) !Renderer {
         var self: Renderer = undefined;
@@ -99,8 +103,47 @@ pub const Renderer = struct {
         };
     }
 
+    // Measures the widest source line's natural (unwrapped) rendered pixel
+    // width, so the code window can be sized to the content instead of a
+    // fixed constant.
+    fn measureMaxLineWidth(self: *Renderer, tokens: []const tree_sitter.Token) f64 {
+        var line_width: f64 = 0.0;
+        var max_width: f64 = 0.0;
+
+        for (tokens) |token| {
+            var iterator = std.mem.splitScalar(u8, token.text, '\n');
+            var first_part = true;
+            while (iterator.next()) |chunk| {
+                if (!first_part) {
+                    if (line_width > max_width) max_width = line_width;
+                    line_width = 0.0;
+                }
+                first_part = false;
+
+                if (chunk.len > 0) {
+                    var text_metrics: c.BLTextMetrics = undefined;
+                    self.calculateTextMetrics(&text_metrics, chunk);
+                    line_width += text_metrics.advance.x;
+                }
+            }
+        }
+        if (line_width > max_width) max_width = line_width;
+
+        return max_width;
+    }
+
     pub fn prepareDrawableChunks(self: *Renderer, tokens: []const tree_sitter.Token) !std.ArrayList(DrawableChunk) {
         const font_metrics = self.fontMetrics();
+        const pad_x = @as(f64, @floatFromInt(self.preset.horizontal_padding_px));
+
+        const raw_max_line_width = self.measureMaxLineWidth(tokens);
+        // + char_width to match the trailing safety margin the wrap check below adds
+        // to every word (pen.x + advance + char_width > wrap_x), so a line that just
+        // fits doesn't get pushed past the threshold by its own last word.
+        const computed_width = code_window_gutter_width + raw_max_line_width + code_window_right_slack + @as(f64, font_metrics.char_width);
+        self.content_width = std.math.clamp(computed_width, code_window_min_width, code_window_max_width);
+        const wrap_x = pad_x + self.content_width - code_window_right_slack;
+
         var drawableChunks = std.ArrayList(DrawableChunk).empty;
         errdefer {
             for (drawableChunks.items) |d| {
@@ -143,8 +186,7 @@ pub const Renderer = struct {
                         var text_metrics: c.BLTextMetrics = undefined;
                         self.calculateTextMetrics(&text_metrics, word);
 
-                        // max screen width, TODO
-                        if (pen.x + text_metrics.advance.x + font_metrics.char_width > 720.0) {
+                        if (pen.x + text_metrics.advance.x + font_metrics.char_width > wrap_x) {
                             try drawableChunks.append(self.allocator, .{
                                 .type = ChunkType.wrap_indicator,
                                 .x = pen.x + 5.0,
@@ -208,7 +250,7 @@ pub const Renderer = struct {
     pub fn initImage(self: *Renderer, last_line_y: f64) void {
         const pad_x = @as(f64, @floatFromInt(self.preset.horizontal_padding_px));
         const pad_y = @as(f64, @floatFromInt(self.preset.vertical_padding_px));
-        const width = @as(i32, @intFromFloat(code_window_max_width + 2 * pad_x));
+        const width = @as(i32, @intFromFloat(self.content_width + 2 * pad_x));
         const height = @as(i32, @intFromFloat(last_line_y + 25.0 + pad_y));
         // self.image/self.context are already default-initialized (in
         // init()), so we (re)create/begin against them rather than
@@ -228,7 +270,7 @@ pub const Renderer = struct {
         const rect = c.BLRoundRect{
             .x = pad_x,
             .y = pad_y,
-            .w = code_window_max_width,
+            .w = self.content_width,
             .h = last_line_y + 25.0 - pad_y,
             .rx = code_window_radius,
             .ry = code_window_radius,
