@@ -8,6 +8,17 @@ const util_indent = @import("util/indent.zig");
 const clipboard = @import("clipboard/clipboard.zig");
 const wizard = @import("interactive/wizard.zig");
 
+fn expandTilde(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, path, "~") or std.mem.startsWith(u8, path, "~/")) {
+        const home = try std.process.getEnvVarOwned(allocator, "HOME");
+        defer allocator.free(home);
+
+        if (std.mem.eql(u8, path, "~")) return try allocator.dupe(u8, home);
+        return try std.fs.path.join(allocator, &[_][]const u8{ home, path[2..] });
+    }
+    return try allocator.dupe(u8, path);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -48,6 +59,29 @@ pub fn main() !void {
             },
         };
         std.log.info("Language '{s}' installed", .{lang});
+        return;
+    }
+
+    if (cli_config.output_dir) |raw_dir| {
+        const expanded = try expandTilde(allocator, raw_dir);
+        defer allocator.free(expanded);
+
+        var dir = std.fs.cwd().openDir(expanded, .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => {
+                std.log.err("'{s}' is not a valid, existing directory", .{expanded});
+                return;
+            },
+            else => return err,
+        };
+        dir.close();
+
+        var output_dir_config = try config.Config.load(allocator);
+        defer output_dir_config.deinit();
+
+        output_dir_config.value.output_directory = expanded;
+
+        try config.Config.save(allocator, output_dir_config.value);
+        std.log.info("Default output directory set to '{s}'", .{expanded});
         return;
     }
 
@@ -118,9 +152,15 @@ pub fn main() !void {
 
     const file_name = try std.fmt.allocPrint(allocator, "znip_output_{d}.png", .{ std.time.timestamp() });
     defer allocator.free(file_name);
-    
+
+    const output_path = if (parsed_config.value.output_directory) |dir|
+        try std.fs.path.join(allocator, &[_][]const u8{ dir, file_name })
+    else
+        try allocator.dupe(u8, file_name);
+    defer allocator.free(output_path);
+
     if (code) |c| {
-        znip.renderImage(c, file_name, cli_config.file_path, active_preset, active_theme, cli_config.lang, cli_config.yes) catch |err| switch (err) {
+        znip.renderImage(c, output_path, cli_config.file_path, active_preset, active_theme, cli_config.lang, cli_config.yes) catch |err| switch (err) {
             error.LanguageNotAvailable => {
                 std.log.err("Language '{s}' is not available (not built in, not cached, and not found in the grammar manifest)", .{cli_config.lang.?});
                 return;
@@ -130,7 +170,7 @@ pub fn main() !void {
     }
 
     if (cli_config.to_clipboard) {
-            const content = try util_files.readFile(allocator, file_name);
+            const content = try util_files.readFile(allocator, output_path);
             defer allocator.free(content);
             try clipboard.write_image(content);
     }

@@ -12,6 +12,7 @@ pub const CLIConfig = struct {
     preset: ?[]const u8 = null,
     lang: ?[]const u8 = null,
     install_lang: ?[]const u8 = null,
+    output_dir: ?[]const u8 = null,
     yes: bool = false,
 
     pub fn deinit(self: *CLIConfig, allocator: std.mem.Allocator) void {
@@ -19,6 +20,7 @@ pub const CLIConfig = struct {
         if (self.preset) |preset| allocator.free(preset);
         if (self.lang) |lang| allocator.free(lang);
         if (self.install_lang) |install_lang| allocator.free(install_lang);
+        if (self.output_dir) |output_dir| allocator.free(output_dir);
     }
 };
 
@@ -32,6 +34,7 @@ pub const params = clap.parseParamsComptime(
     \\-p, --preset <str>      Use a specific preset for this run
     \\    --lang <str>        Explicit language override, bypasses automatic detection
     \\    --install-lang <str> Fetches and caches a WASM grammar for the given language, then exits
+    \\    --output-dir <str>  Sets the default directory where generated images are saved, then exits
     \\-y, --yes               Skip the download confirmation prompt for on-demand grammars
     \\<str>                   The file path of the code that would be used
 );
@@ -54,6 +57,12 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     const raw_install_lang: ?[]const u8 = result.args.@"install-lang";
     if (raw_install_lang) |raw| {
         return CLIConfig{ .install_lang = try allocator.dupe(u8, raw) };
+    }
+
+    // --output-dir early: config-only, no file/clipboard input required.
+    const raw_output_dir: ?[]const u8 = result.args.@"output-dir";
+    if (raw_output_dir) |raw| {
+        return CLIConfig{ .output_dir = try allocator.dupe(u8, raw) };
     }
 
     const raw_path = if (result.positionals.len > 0) result.positionals[0] else null;

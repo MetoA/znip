@@ -14,12 +14,10 @@ pub const Preset = struct {
 
 pub const Config = struct {
     active_preset: []const u8,
+    output_directory: ?[]const u8 = null,
 
     pub fn load(allocator: std.mem.Allocator) !std.json.Parsed(Config) {
-        const home = try std.process.getEnvVarOwned(allocator, "HOME");
-        defer allocator.free(home);
-
-        const path = try std.fs.path.join(allocator, &[_][]const u8{ home, ".znip", "config.json" });
+        const path = try configPath(allocator);
         defer allocator.free(path);
 
         const data = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
@@ -31,6 +29,16 @@ pub const Config = struct {
         defer allocator.free(data);
 
         return try std.json.parseFromSlice(Config, allocator, data, .{ .allocate = .alloc_always});
+    }
+
+    pub fn save(allocator: std.mem.Allocator, cfg: Config) !void {
+        const path = try configPath(allocator);
+        defer allocator.free(path);
+
+        const json_data = try std.json.Stringify.valueAlloc(allocator, cfg, .{ .whitespace = .indent_2 });
+        defer allocator.free(json_data);
+
+        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = json_data });
     }
 
     pub fn loadPreset(allocator: std.mem.Allocator, name: []const u8) !std.json.Parsed(Preset) {
@@ -60,6 +68,13 @@ pub const Config = struct {
         try std.fs.cwd().writeFile(.{ .sub_path = path_with_ext, .data = json_data });
     }
 };
+
+fn configPath(allocator: std.mem.Allocator) ![]const u8 {
+    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    defer allocator.free(home);
+
+    return try std.fs.path.join(allocator, &[_][]const u8{ home, ".znip", "config.json" });
+}
 
 fn presetPath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
     const home = try std.process.getEnvVarOwned(allocator, "HOME");
