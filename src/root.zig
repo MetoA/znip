@@ -50,10 +50,13 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
         }
     }
 
+    output.step("Parsing source code...", .{});
     var matches = try parser.sourceCodeMatches();
     defer matches.deinit(arena_allocator);
     var tokens = try parser.sourceCodeTokens(matches);
     defer tokens.deinit(arena_allocator);
+
+    output.step("Rendering image...", .{});
     var chunks = try renderer.prepareDrawableChunks(tokens.items);
     defer chunks.deinit(arena_allocator);
     const last_chunk_height: f64 = if (chunks.items.len > 0) chunks.getLast().y else 300.0;
@@ -63,6 +66,8 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     renderer.drawCodeWindowControls();
     renderer.drawFileName();
     try renderer.drawChunks(chunks.items);
+
+    output.step("Saving image...", .{});
     try renderer.saveImage(file_name);
 }
 
@@ -85,11 +90,26 @@ pub fn installLanguage(allocator: std.mem.Allocator, name: []const u8) anyerror!
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    var manifest = try grammar_cache.fetchManifest(allocator, &client, grammar_cache.default_manifest_url);
+    var spinner: output.Spinner = undefined;
+    try spinner.start(allocator, "Installing language '{s}'...", .{name});
+
+    var manifest = grammar_cache.fetchManifest(allocator, &client, grammar_cache.default_manifest_url) catch |err| {
+        spinner.stop(false, "Couldn't fetch the grammar manifest: {s}", .{@errorName(err)});
+        return err;
+    };
     defer manifest.deinit();
 
-    const entry = grammar_cache.findEntry(manifest.value, name) orelse return error.LanguageNotInManifest;
-    try grammar_cache.fetchGrammar(allocator, &client, entry);
+    const entry = grammar_cache.findEntry(manifest.value, name) orelse {
+        spinner.stop(false, "Language '{s}' wasn't found in the grammar manifest.", .{name});
+        return error.LanguageNotInManifest;
+    };
+
+    grammar_cache.fetchGrammar(allocator, &client, entry) catch |err| {
+        spinner.stop(false, "Couldn't download the grammar for '{s}': {s}", .{ name, @errorName(err) });
+        return err;
+    };
+
+    spinner.stop(true, "Language '{s}' installed.", .{name});
 }
 
 // Automatic fetch-on-first-use: checks the manifest for `name` and, if
@@ -116,11 +136,14 @@ fn maybeFetchDynamicLanguage(allocator: std.mem.Allocator, name: []const u8, aut
         if (!promptYesNo()) return;
     }
 
+    var spinner: output.Spinner = undefined;
+    spinner.start(allocator, "Downloading grammar for '{s}'...", .{name}) catch return;
+
     grammar_cache.fetchGrammar(allocator, &client, entry) catch |err| {
-        output.err("Couldn't download the grammar for '{s}': {s}", .{ name, @errorName(err) });
+        spinner.stop(false, "Couldn't download the grammar for '{s}': {s}", .{ name, @errorName(err) });
         return;
     };
-    output.ok("Downloaded grammar for '{s}'.", .{name});
+    spinner.stop(true, "Downloaded grammar for '{s}'.", .{name});
 }
 
 fn promptYesNo() bool {

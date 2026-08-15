@@ -64,17 +64,14 @@ pub fn main() !void {
     }
 
     if (cli_config.install_lang) |lang| {
-        znip.installLanguage(allocator, lang) catch |err| switch (err) {
-            error.LanguageNotInManifest => {
-                output.err("Language '{s}' wasn't found in the grammar manifest.", .{lang});
-                return;
-            },
-            else => {
-                output.err("Couldn't install language '{s}': {s}", .{ lang, @errorName(err) });
-                return;
-            },
+        // installLanguage reports success/failure itself via a spinner, except
+        // for WasmSupportNotBuilt, which returns before the spinner ever starts.
+        znip.installLanguage(allocator, lang) catch |err| {
+            if (err == error.WasmSupportNotBuilt) {
+                output.err("This build of znip doesn't support installing languages (built without WASM support).", .{});
+            }
+            return;
         };
-        output.ok("Language '{s}' installed.", .{lang});
         return;
     }
 
@@ -239,6 +236,7 @@ pub fn main() !void {
             return;
         };
         defer allocator.free(content);
+        output.step("Copying to clipboard...", .{});
         clipboard.write_image(content) catch |err| {
             output.err("Couldn't copy the image to the clipboard: {s}", .{@errorName(err)});
             return;
