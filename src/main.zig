@@ -36,6 +36,21 @@ pub fn main() !void {
         return;
     }
 
+    if (cli_config.install_lang) |lang| {
+        znip.installLanguage(allocator, lang) catch |err| switch (err) {
+            error.LanguageNotInManifest => {
+                std.log.err("Language '{s}' was not found in the grammar manifest", .{lang});
+                return;
+            },
+            else => {
+                std.log.err("Failed to install language '{s}': {s}", .{ lang, @errorName(err) });
+                return;
+            },
+        };
+        std.log.info("Language '{s}' installed", .{lang});
+        return;
+    }
+
     var parsed_config = try config.Config.load(allocator);
     defer parsed_config.deinit();
 
@@ -105,7 +120,13 @@ pub fn main() !void {
     defer allocator.free(file_name);
     
     if (code) |c| {
-        try znip.renderImage(c, file_name, cli_config.file_path, active_preset, active_theme);
+        znip.renderImage(c, file_name, cli_config.file_path, active_preset, active_theme, cli_config.lang, cli_config.yes) catch |err| switch (err) {
+            error.LanguageNotAvailable => {
+                std.log.err("Language '{s}' is not available (not built in, not cached, and not found in the grammar manifest)", .{cli_config.lang.?});
+                return;
+            },
+            else => return err,
+        };
     }
 
     if (cli_config.to_clipboard) {

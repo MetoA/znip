@@ -1,5 +1,7 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const tree_sitter = @import("core/tree_sitter.zig");
+const grammar_cache = @import("core/grammar_cache.zig");
 const Preset = @import("core/config.zig").Preset;
 const root_config = @import("core/config.zig");
 const theme = @import("ui/theme.zig");
@@ -9,7 +11,7 @@ pub const config = @import("core/config.zig");
 pub const theme_module = @import("ui/theme.zig");
 pub const fonts_module = @import("util/fonts.zig");
 
-pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8, preset: Preset, active_theme: theme.Theme) !void {
+pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8, preset: Preset, active_theme: theme.Theme, requested_lang: ?[]const u8, auto_confirm: bool) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
@@ -23,6 +25,29 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     defer renderer.deinit();
 
     var parser = tree_sitter.Parser.init(arena_allocator, source_code, source_hint_path);
+    var registry = tree_sitter.LanguageRegistry.init(arena_allocator);
+    parser.attachRegistry(&registry);
+    if (requested_lang) |lang| parser.setRequestedLanguage(lang);
+
+    // Explicit --lang always drives the candidate; otherwise, only bother
+    // checking the manifest for names that already look unrecognized (native
+    // extension/fence-tag lookups keep working exactly as before, with zero
+    // network activity for the common case).
+    //
+    // Gated on wasm_enabled: a build without WASM support can never actually
+    // load a fetched grammar (LanguageRegistry.resolve() is comptime-compiled
+    // to always return null), so prompting/downloading one would just be a
+    // pointless network round-trip that silently goes nowhere.
+    if (comptime build_options.wasm_enabled) {
+        const candidate = requested_lang orelse
+            if (source_hint_path) |p| tree_sitter.candidateNameFromPath(p) else null;
+
+        if (candidate) |name| {
+            if (tree_sitter.nativeLanguageFromHint(name) == null and try registry.resolve(name) == null) {
+                maybeFetchDynamicLanguage(arena_allocator, name, auto_confirm);
+            }
+        }
+    }
 
     var matches = try parser.sourceCodeMatches();
     defer matches.deinit(arena_allocator);
@@ -43,3 +68,72 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
 pub fn createRootConfigDirectories(allocator: std.mem.Allocator) !void {
     try root_config.createRootConfigDirectories(allocator);
 }
+
+// Explicit, one-shot install (--install-lang): fetches the manifest, looks
+// up `name`, and fetches+caches its grammar bundle. No prompt - the caller
+// already asked explicitly.
+// Explicit `anyerror` return: the WasmSupportNotBuilt early-return below
+// makes the rest of this function's body unreachable (and its errors
+// pruned from the inferred set) when built with -Dwasm=false - an inferred
+// `!void` would silently shrink to just {WasmSupportNotBuilt} in that
+// config, breaking main.zig's switch on error.LanguageNotInManifest, which
+// is only reachable in the wasm-enabled config.
+pub fn installLanguage(allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    if (comptime !build_options.wasm_enabled) return error.WasmSupportNotBuilt;
+
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    var manifest = try grammar_cache.fetchManifest(allocator, &client, grammar_cache.default_manifest_url);
+    defer manifest.deinit();
+
+    const entry = grammar_cache.findEntry(manifest.value, name) orelse return error.LanguageNotInManifest;
+    try grammar_cache.fetchGrammar(allocator, &client, entry);
+}
+
+// Automatic fetch-on-first-use: checks the manifest for `name` and, if
+// listed, prompts (unless auto_confirm) before fetching. Never returns an
+// error - a missing manifest, an unlisted language, or a declined prompt are
+// all just "nothing to do here", logged at debug level so the common case of
+// a plain unrecognized extension stays silent and offline.
+fn maybeFetchDynamicLanguage(allocator: std.mem.Allocator, name: []const u8, auto_confirm: bool) void {
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    var manifest = grammar_cache.fetchManifest(allocator, &client, grammar_cache.default_manifest_url) catch |err| {
+        std.log.debug("Grammar manifest unavailable, skipping on-demand fetch for '{s}': {s}", .{ name, @errorName(err) });
+        return;
+    };
+    defer manifest.deinit();
+
+    const entry = grammar_cache.findEntry(manifest.value, name) orelse {
+        std.log.debug("No WASM grammar available for '{s}'", .{name});
+        return;
+    };
+
+    if (!auto_confirm) {
+        std.debug.print("Language '{s}' isn't built in - download WASM grammar? [y/N] ", .{name});
+        if (!promptYesNo()) return;
+    }
+
+    grammar_cache.fetchGrammar(allocator, &client, entry) catch |err| {
+        std.log.err("Failed to fetch grammar for '{s}': {s}", .{ name, @errorName(err) });
+        return;
+    };
+    std.log.info("Downloaded grammar for '{s}'", .{name});
+}
+
+fn promptYesNo() bool {
+    var buf: [16]u8 = undefined;
+    const stdin = std.fs.File.stdin();
+    const n = stdin.read(&buf) catch return false;
+    if (n == 0) return false;
+    const answer = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    return answer.len > 0 and (answer[0] == 'y' or answer[0] == 'Y');
+}
+
+test {
+    std.testing.refAllDecls(tree_sitter);
+    std.testing.refAllDecls(grammar_cache);
+}
+

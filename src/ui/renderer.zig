@@ -35,6 +35,17 @@ pub const Renderer = struct {
         self.active_theme = active_theme;
         self.display_file_name = display_file_name;
 
+        // Default-initialized here (not just at initImage() time) so that
+        // deinit() is always safe to call, even if rendering fails before
+        // initImage() runs (e.g. an unresolvable language via --lang) -
+        // calling bl_image_reset/bl_context_reset on undefined memory is
+        // undefined behavior in Blend2D.
+        _ = c.bl_image_init(&self.image);
+        errdefer _ = c.bl_image_reset(&self.image);
+
+        _ = c.bl_context_init(&self.context);
+        errdefer _ = c.bl_context_reset(&self.context);
+
         _ = c.bl_font_face_init(&self.face);
         errdefer _ = c.bl_font_face_reset(&self.face);
 
@@ -199,8 +210,11 @@ pub const Renderer = struct {
         const pad_y = @as(f64, @floatFromInt(self.preset.vertical_padding_px));
         const width = @as(i32, @intFromFloat(code_window_max_width + 2 * pad_x));
         const height = @as(i32, @intFromFloat(last_line_y + 25.0 + pad_y));
-        _ = c.bl_image_init_as(&self.image, width, height, c.BL_FORMAT_PRGB32);
-        _ = c.bl_context_init_as(&self.context, &self.image, null);
+        // self.image/self.context are already default-initialized (in
+        // init()), so we (re)create/begin against them rather than
+        // "_init_as", which assumes uninitialized memory.
+        _ = c.bl_image_create(&self.image, width, height, c.BL_FORMAT_PRGB32);
+        _ = c.bl_context_begin(&self.context, &self.image, null);
     }
 
     pub fn fillBackground(self: *Renderer) void {
