@@ -83,6 +83,6 @@ pub fn write(png_bytes: []const u8) !void {
     try proc.stdin.?.writeAll(png_bytes);
     proc.stdin.?.close();
     proc.stdin = null;
-    const term = proc.wait() catch unreachable;
-    if (term != .Exited or term.Exited != 0) unreachable;
+    const term = proc.wait() catch return error.ClipboardProcessFailed;
+    if (term != .Exited or term.Exited != 0) return error.ClipboardProcessFailed;
 }

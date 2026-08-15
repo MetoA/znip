@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const znip = @import("znip");
 const fonts = znip.fonts_module;
+const output = znip.output;
 
 const Preset = znip.config.Preset;
 
@@ -230,8 +231,11 @@ pub fn run(allocator: std.mem.Allocator) !Result {
         .include_drop_shadow = include_drop_shadow,
     };
 
-    if (preset_name != null) {
-        try znip.config.Config.savePreset(allocator, preset);
+    if (preset_name) |name| {
+        znip.config.Config.savePreset(allocator, preset) catch |err| {
+            output.err("Couldn't save preset '{s}': {s}", .{ name, @errorName(err) });
+            return err;
+        };
     }
 
     return Result{ .preset = preset, .saved_as = preset_name, .output_name = output_name };

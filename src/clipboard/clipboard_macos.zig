@@ -63,6 +63,6 @@ pub fn write(png_bytes: []const u8) !void {
     proc.stderr_behavior = .Ignore;
 
     try proc.spawn();
-    const term = proc.wait() catch unreachable;
-    if (term != .Exited or term.Exited != 0) unreachable;
+    const term = proc.wait() catch return error.ClipboardProcessFailed;
+    if (term != .Exited or term.Exited != 0) return error.ClipboardProcessFailed;
 }

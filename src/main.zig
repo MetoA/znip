@@ -7,6 +7,7 @@ const util_files = @import("util/files.zig");
 const util_indent = @import("util/indent.zig");
 const clipboard = @import("clipboard/clipboard.zig");
 const wizard = @import("interactive/wizard.zig");
+const output = znip.output;
 
 fn expandTilde(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     if (std.mem.eql(u8, path, "~") or std.mem.startsWith(u8, path, "~/")) {
@@ -24,19 +25,34 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    try znip.createRootConfigDirectories(allocator);
+    znip.createRootConfigDirectories(allocator) catch |err| {
+        output.err("Couldn't set up '~/.znip': {s}", .{@errorName(err)});
+        return;
+    };
 
     var cli_config = cli.parse(allocator) catch |err| switch (err) {
         error.InvalidStartEndLines => {
-            std.log.err("Invalid Start and end lines", .{});
+            output.err("The start line must come before the end line.", .{});
             return;
         },
         error.MultipleCodeSourcesNotSupported => {
-            std.log.err("Multiple code sources not supported", .{});
+            output.err("Please provide either a file path or --from-clipboard, not both.", .{});
+            return;
+        },
+        error.NoInputProvided => {
+            output.err("No input provided. Pass a file path or use --from-clipboard.", .{});
+            return;
+        },
+        error.InvalidStartLine => {
+            output.err("The start line must be 1 or greater.", .{});
+            return;
+        },
+        error.InvalidEndLine => {
+            output.err("The end line must be 1 or greater.", .{});
             return;
         },
         else => {
-            std.log.err("Error {}", .{err});
+            output.err("Couldn't parse the command line arguments: {s}", .{@errorName(err)});
             return;
         },
     };
@@ -50,15 +66,15 @@ pub fn main() !void {
     if (cli_config.install_lang) |lang| {
         znip.installLanguage(allocator, lang) catch |err| switch (err) {
             error.LanguageNotInManifest => {
-                std.log.err("Language '{s}' was not found in the grammar manifest", .{lang});
+                output.err("Language '{s}' wasn't found in the grammar manifest.", .{lang});
                 return;
             },
             else => {
-                std.log.err("Failed to install language '{s}': {s}", .{ lang, @errorName(err) });
+                output.err("Couldn't install language '{s}': {s}", .{ lang, @errorName(err) });
                 return;
             },
         };
-        std.log.info("Language '{s}' installed", .{lang});
+        output.ok("Language '{s}' installed.", .{lang});
         return;
     }
 
@@ -68,24 +84,36 @@ pub fn main() !void {
 
         var dir = std.fs.cwd().openDir(expanded, .{}) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => {
-                std.log.err("'{s}' is not a valid, existing directory", .{expanded});
+                output.err("'{s}' is not a valid, existing directory.", .{expanded});
                 return;
             },
-            else => return err,
+            else => {
+                output.err("Couldn't open '{s}': {s}", .{ expanded, @errorName(err) });
+                return;
+            },
         };
         dir.close();
 
-        var output_dir_config = try config.Config.load(allocator);
+        var output_dir_config = config.Config.load(allocator) catch |err| {
+            output.err("Couldn't load your configuration: {s}", .{@errorName(err)});
+            return;
+        };
         defer output_dir_config.deinit();
 
         output_dir_config.value.output_directory = expanded;
 
-        try config.Config.save(allocator, output_dir_config.value);
-        std.log.info("Default output directory set to '{s}'", .{expanded});
+        config.Config.save(allocator, output_dir_config.value) catch |err| {
+            output.err("Couldn't save your configuration: {s}", .{@errorName(err)});
+            return;
+        };
+        output.ok("Default output directory set to '{s}'.", .{expanded});
         return;
     }
 
-    var parsed_config = try config.Config.load(allocator);
+    var parsed_config = config.Config.load(allocator) catch |err| {
+        output.err("Couldn't load your configuration: {s}", .{@errorName(err)});
+        return;
+    };
     defer parsed_config.deinit();
 
     var wizard_result: ?wizard.Result = null;
@@ -96,12 +124,24 @@ pub fn main() !void {
 
     const active_preset: config.Preset = blk: {
         if (cli_config.interactive) {
-            wizard_result = try wizard.run(allocator);
+            wizard_result = wizard.run(allocator) catch |err| switch (err) {
+                error.WizardCancelled => {
+                    output.ok("Cancelled.", .{});
+                    return;
+                },
+                else => {
+                    output.err("The interactive wizard failed: {s}", .{@errorName(err)});
+                    return;
+                },
+            };
             break :blk wizard_result.?.preset;
         }
 
         const preset_name = cli_config.preset orelse parsed_config.value.active_preset;
-        parsed_preset = try config.Config.loadPreset(allocator, preset_name);
+        parsed_preset = config.Config.loadPreset(allocator, preset_name) catch |err| {
+            output.err("Couldn't load preset '{s}': {s}", .{ preset_name, @errorName(err) });
+            return;
+        };
         break :blk parsed_preset.?.value;
     };
 
@@ -111,28 +151,40 @@ pub fn main() !void {
 
     if (cli_config.file_path) |file_path| {
         code = util_files.getLinesInRange(allocator, file_path, cli_config.starting_line, cli_config.ending_line) catch |err| switch (err) {
+            error.FileNotFound => {
+                output.err("'{s}' doesn't exist.", .{file_path});
+                return;
+            },
             error.BinaryFileNotSupported => {
-                std.log.err("BINARY FILE NOT SUPPORTED", .{});
+                output.err("'{s}' looks like a binary file, which isn't supported.", .{file_path});
                 return;
             },
             error.EmptyFileNotSupported => {
-                std.log.err("EMPTY FILE NOT SUPPORTED", .{});
+                output.err("'{s}' is empty, so there's nothing to render.", .{file_path});
                 return;
             },
             error.InvalidRange => {
-                std.log.err("INVALID RANGE", .{});
+                output.err("The requested line range isn't valid for '{s}'.", .{file_path});
+                return;
+            },
+            error.FileTooLarge => {
+                output.err("'{s}' is too large (max 10MB).", .{file_path});
                 return;
             },
             else => {
-                std.log.err("OTHER ERROR", .{});
-                return err;
+                output.err("Couldn't read '{s}': {s}", .{ file_path, @errorName(err) });
+                return;
             },
         };
     }
 
     if (cli_config.from_clipboard) {
-        code = clipboard.read(allocator) catch {
-            std.log.err("CLIPBOARD READ ERR", .{});
+        code = clipboard.read(allocator) catch |err| {
+            if (std.mem.eql(u8, @errorName(err), "ClipboardCmdNotFound")) {
+                output.err("No clipboard tool found. Install xclip, xsel, or wl-copy.", .{});
+            } else {
+                output.err("Couldn't read from the clipboard: {s}", .{@errorName(err)});
+            }
             return;
         };
     }
@@ -146,7 +198,7 @@ pub fn main() !void {
     defer if (code) |c| allocator.free(c);
 
     if (code == null) {
-        std.log.err("NO CODE PROVIDED", .{});
+        output.err("No code provided. Pass a file path or use --from-clipboard.", .{});
         return;
     }
 
@@ -170,16 +222,27 @@ pub fn main() !void {
     if (code) |c| {
         znip.renderImage(c, output_path, cli_config.file_path, active_preset, active_theme, cli_config.lang, cli_config.yes) catch |err| switch (err) {
             error.LanguageNotAvailable => {
-                std.log.err("Language '{s}' is not available (not built in, not cached, and not found in the grammar manifest)", .{cli_config.lang.?});
+                output.err("Language '{s}' isn't available (not built in, not cached, and not found in the grammar manifest).", .{cli_config.lang.?});
                 return;
             },
-            else => return err,
+            else => {
+                output.err("Couldn't render the image: {s}", .{@errorName(err)});
+                return;
+            },
         };
+        output.ok("Saved to '{s}'.", .{output_path});
     }
 
     if (cli_config.to_clipboard) {
-            const content = try util_files.readFile(allocator, output_path);
-            defer allocator.free(content);
-            try clipboard.write_image(content);
+        const content = util_files.readFile(allocator, output_path) catch |err| {
+            output.err("Couldn't read the generated image back for the clipboard: {s}", .{@errorName(err)});
+            return;
+        };
+        defer allocator.free(content);
+        clipboard.write_image(content) catch |err| {
+            output.err("Couldn't copy the image to the clipboard: {s}", .{@errorName(err)});
+            return;
+        };
+        output.ok("Copied to clipboard.", .{});
     }
 }

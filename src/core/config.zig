@@ -115,7 +115,6 @@ fn createRootDirectory(allocator: std.mem.Allocator, path: []const u8) !void {
 
     std.fs.makeDirAbsolute(full_path) catch |err| {
         if (err == error.PathAlreadyExists) {
-            std.log.debug("PathAlreadyExists", .{});
             return;
         }
         return err;
@@ -134,7 +133,6 @@ fn createRootFile(allocator: std.mem.Allocator, path: []const u8, contents: []co
         .exclusive = true,
     }) catch |err| {
         if (err == error.PathAlreadyExists) {
-            std.log.debug("PathAlreadyExists", .{});
             return;
         }
         return err;

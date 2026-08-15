@@ -10,6 +10,7 @@ const Renderer = @import("ui/renderer.zig").Renderer;
 pub const config = @import("core/config.zig");
 pub const theme_module = @import("ui/theme.zig");
 pub const fonts_module = @import("util/fonts.zig");
+pub const output = @import("util/output.zig");
 
 pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8, preset: Preset, active_theme: theme.Theme, requested_lang: ?[]const u8, auto_confirm: bool) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -62,7 +63,7 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     renderer.drawCodeWindowControls();
     renderer.drawFileName();
     try renderer.drawChunks(chunks.items);
-    renderer.saveImage(file_name);
+    try renderer.saveImage(file_name);
 }
 
 pub fn createRootConfigDirectories(allocator: std.mem.Allocator) !void {
@@ -107,7 +108,6 @@ fn maybeFetchDynamicLanguage(allocator: std.mem.Allocator, name: []const u8, aut
     defer manifest.deinit();
 
     const entry = grammar_cache.findEntry(manifest.value, name) orelse {
-        std.log.debug("No WASM grammar available for '{s}'", .{name});
         return;
     };
 
@@ -117,10 +117,10 @@ fn maybeFetchDynamicLanguage(allocator: std.mem.Allocator, name: []const u8, aut
     }
 
     grammar_cache.fetchGrammar(allocator, &client, entry) catch |err| {
-        std.log.err("Failed to fetch grammar for '{s}': {s}", .{ name, @errorName(err) });
+        output.err("Couldn't download the grammar for '{s}': {s}", .{ name, @errorName(err) });
         return;
     };
-    std.log.info("Downloaded grammar for '{s}'", .{name});
+    output.ok("Downloaded grammar for '{s}'.", .{name});
 }
 
 fn promptYesNo() bool {

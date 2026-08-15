@@ -392,12 +392,17 @@ pub const Renderer = struct {
         _ = c.bl_context_stroke_path_d(&self.context, &origin, &path);
     }
 
-    pub fn saveImage(self: *Renderer, file_name: []const u8) void {
+    pub fn saveImage(self: *Renderer, file_name: []const u8) !void {
         var codec: c.BLImageCodecCore = undefined;
         _ = c.bl_image_codec_init(&codec);
-        _ = c.bl_image_codec_find_by_name(&codec, "PNG", @intCast("PNG".len), null);
-        _ = c.bl_image_write_to_file(&self.image, file_name.ptr, &codec);
-        _ = c.bl_image_codec_reset(&codec);
+        defer _ = c.bl_image_codec_reset(&codec);
+
+        if (c.bl_image_codec_find_by_name(&codec, "PNG", @intCast("PNG".len), null) != c.BL_SUCCESS) {
+            return error.ImageWriteFailed;
+        }
+        if (c.bl_image_write_to_file(&self.image, file_name.ptr, &codec) != c.BL_SUCCESS) {
+            return error.ImageWriteFailed;
+        }
     }
 };
 
