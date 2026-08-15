@@ -61,3 +61,30 @@ pub fn readFile(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8
     const stats = try file.stat();
     return try file.readToEndAlloc(allocator, stats.size);
 }
+
+/// Appends ".png" to `name` unless it already ends with ".png" (case-insensitive).
+pub fn ensurePngExtension(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    if (std.ascii.endsWithIgnoreCase(name, ".png")) return try allocator.dupe(u8, name);
+    return try std.fmt.allocPrint(allocator, "{s}.png", .{name});
+}
+
+/// Given a candidate file path, returns a path guaranteed not to already exist,
+/// appending " (1)", " (2)", etc. before the extension (Windows-style) as needed.
+pub fn uniqueOutputPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    if (std.fs.cwd().access(path, .{})) |_| {} else |_| {
+        return try allocator.dupe(u8, path);
+    }
+
+    const ext = std.fs.path.extension(path);
+    const stem = path[0 .. path.len - ext.len];
+
+    var attempt: usize = 1;
+    while (true) : (attempt += 1) {
+        const candidate = try std.fmt.allocPrint(allocator, "{s} ({d}){s}", .{ stem, attempt, ext });
+        if (std.fs.cwd().access(candidate, .{})) |_| {
+            allocator.free(candidate);
+        } else |_| {
+            return candidate;
+        }
+    }
+}

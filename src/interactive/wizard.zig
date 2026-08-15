@@ -13,11 +13,13 @@ const Event = union(enum) {
 pub const Result = struct {
     preset: Preset,
     saved_as: ?[]const u8,
+    output_name: ?[]const u8,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         allocator.free(self.preset.theme);
         allocator.free(self.preset.font);
         if (self.preset.name) |name| allocator.free(name);
+        if (self.output_name) |name| allocator.free(name);
     }
 };
 
@@ -192,6 +194,20 @@ pub fn run(allocator: std.mem.Allocator) !Result {
     const horizontal_padding_px = try wiz.numberInput("Horizontal padding (px)", 50);
     const include_drop_shadow = try wiz.confirm("Include drop shadow?", true);
 
+    const raw_output_name = try wiz.textInput("File name (optional, press enter for default)", null, null);
+    const output_name: ?[]const u8 = blk: {
+        const trimmed = std.mem.trim(u8, raw_output_name, " \t");
+        if (trimmed.len == 0) {
+            allocator.free(raw_output_name);
+            break :blk null;
+        }
+        if (trimmed.len == raw_output_name.len) break :blk raw_output_name;
+        const owned = try allocator.dupe(u8, trimmed);
+        allocator.free(raw_output_name);
+        break :blk owned;
+    };
+    errdefer if (output_name) |name| allocator.free(name);
+
     const save_options = [_][]const u8{ "Save as a named preset", "Use once for this run" };
     const save_choice = try wiz.selectOne("What would you like to do with this configuration?", &save_options);
 
@@ -218,5 +234,5 @@ pub fn run(allocator: std.mem.Allocator) !Result {
         try znip.config.Config.savePreset(allocator, preset);
     }
 
-    return Result{ .preset = preset, .saved_as = preset_name };
+    return Result{ .preset = preset, .saved_as = preset_name, .output_name = output_name };
 }

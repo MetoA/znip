@@ -150,13 +150,21 @@ pub fn main() !void {
         return;
     }
 
-    const file_name = try std.fmt.allocPrint(allocator, "znip_output_{d}.png", .{ std.time.timestamp() });
+    const base_name = if (wizard_result) |r| r.output_name else cli_config.output_name;
+
+    const file_name = if (base_name) |name|
+        try util_files.ensurePngExtension(allocator, name)
+    else
+        try std.fmt.allocPrint(allocator, "znip_output_{d}.png", .{ std.time.timestamp() });
     defer allocator.free(file_name);
 
-    const output_path = if (parsed_config.value.output_directory) |dir|
+    const candidate_path = if (parsed_config.value.output_directory) |dir|
         try std.fs.path.join(allocator, &[_][]const u8{ dir, file_name })
     else
         try allocator.dupe(u8, file_name);
+    defer allocator.free(candidate_path);
+
+    const output_path = try util_files.uniqueOutputPath(allocator, candidate_path);
     defer allocator.free(output_path);
 
     if (code) |c| {

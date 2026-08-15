@@ -13,6 +13,7 @@ pub const CLIConfig = struct {
     lang: ?[]const u8 = null,
     install_lang: ?[]const u8 = null,
     output_dir: ?[]const u8 = null,
+    output_name: ?[]const u8 = null,
     yes: bool = false,
 
     pub fn deinit(self: *CLIConfig, allocator: std.mem.Allocator) void {
@@ -21,6 +22,7 @@ pub const CLIConfig = struct {
         if (self.lang) |lang| allocator.free(lang);
         if (self.install_lang) |install_lang| allocator.free(install_lang);
         if (self.output_dir) |output_dir| allocator.free(output_dir);
+        if (self.output_name) |output_name| allocator.free(output_name);
     }
 };
 
@@ -32,6 +34,7 @@ pub const params = clap.parseParamsComptime(
     \\    --to-clipboard      Copies the generated image to your clipboard
     \\-i, --interactive       Initiates an interactive step by step process of selecting various configurations
     \\-p, --preset <str>      Use a specific preset for this run
+    \\-n, --name <str>        Sets the name of the saved output file (.png is appended if missing)
     \\    --lang <str>        Explicit language override, bypasses automatic detection
     \\    --install-lang <str> Fetches and caches a WASM grammar for the given language, then exits
     \\    --output-dir <str>  Sets the default directory where generated images are saved, then exits
@@ -77,6 +80,10 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     const lang = if (raw_lang) |l| try allocator.dupe(u8, l) else null;
     errdefer if (lang) |l| allocator.free(l);
 
+    const raw_name: ?[]const u8 = result.args.name;
+    const output_name = if (raw_name) |n| try allocator.dupe(u8, n) else null;
+    errdefer if (output_name) |n| allocator.free(n);
+
     const from_clipboard = result.args.@"from-clipboard" != 0;
     if (file_path != null and from_clipboard) {
         return error.MultipleCodeSourcesNotSupported;
@@ -106,6 +113,7 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
         .interactive = result.args.interactive != 0,
         .preset = preset,
         .lang = lang,
+        .output_name = output_name,
         .yes = result.args.yes != 0,
     };
 }
