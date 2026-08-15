@@ -14,7 +14,7 @@ fn useEmoji() bool {
 /// A user-facing failure. Prefixed with an emoji on a real terminal.
 pub fn err(comptime fmt: []const u8, args: anytype) void {
     if (useEmoji()) {
-        std.log.err("❌ " ++ fmt, args);
+        std.log.err("❌  " ++ fmt, args);
     } else {
         std.log.err(fmt, args);
     }
@@ -32,7 +32,7 @@ pub fn warn(comptime fmt: []const u8, args: anytype) void {
 /// A successful outcome worth confirming to the user.
 pub fn ok(comptime fmt: []const u8, args: anytype) void {
     if (useEmoji()) {
-        std.log.info("✅ " ++ fmt, args);
+        std.log.info("✅  " ++ fmt, args);
     } else {
         std.log.info(fmt, args);
     }
@@ -41,7 +41,7 @@ pub fn ok(comptime fmt: []const u8, args: anytype) void {
 /// A step that's about to run. Pair with a later `ok`/`err` call once it's done.
 pub fn step(comptime fmt: []const u8, args: anytype) void {
     if (useEmoji()) {
-        std.log.info("⏳ " ++ fmt, args);
+        std.log.info("⏳  " ++ fmt, args);
     } else {
         std.log.info(fmt, args);
     }
@@ -84,7 +84,7 @@ pub const Spinner = struct {
         var frame: usize = 0;
         while (running.load(.acquire)) {
             var buf: [512]u8 = undefined;
-            const line = std.fmt.bufPrint(&buf, "\r{s} {s}", .{ spinner_frames[frame % spinner_frames.len], message }) catch break;
+            const line = std.fmt.bufPrint(&buf, "\r{s}  {s}", .{ spinner_frames[frame % spinner_frames.len], message }) catch break;
             stderr.writeAll(line) catch break;
             frame += 1;
             std.Thread.sleep(spinner_interval_ns);

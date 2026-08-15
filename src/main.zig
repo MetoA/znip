@@ -9,6 +9,24 @@ const clipboard = @import("clipboard/clipboard.zig");
 const wizard = @import("interactive/wizard.zig");
 const output = znip.output;
 
+pub const std_options: std.Options = .{ .logFn = logFn };
+
+/// Mirrors std.log.defaultLog, minus the "info: "/"error: "/etc. level prefix -
+/// output.zig's helpers already carry their own emoji marker.
+fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = level;
+    _ = scope;
+    var buffer: [64]u8 = undefined;
+    const stderr = std.debug.lockStderrWriter(&buffer);
+    defer std.debug.unlockStderrWriter();
+    nosuspend stderr.print(format ++ "\n", args) catch return;
+}
+
 fn expandTilde(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     if (std.mem.eql(u8, path, "~") or std.mem.startsWith(u8, path, "~/")) {
         const home = try std.process.getEnvVarOwned(allocator, "HOME");
