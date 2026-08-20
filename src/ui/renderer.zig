@@ -132,7 +132,7 @@ pub const Renderer = struct {
         return max_width;
     }
 
-    pub fn prepareDrawableChunks(self: *Renderer, tokens: []const tree_sitter.Token) !std.ArrayList(DrawableChunk) {
+    pub fn prepareDrawableChunks(self: *Renderer, tokens: []const tree_sitter.Token, starting_line: u32, highlight_lines: []const usize) !PreparedChunks {
         const font_metrics = self.fontMetrics();
         const pad_x = @as(f64, @floatFromInt(self.preset.horizontal_padding_px));
 
@@ -151,12 +151,22 @@ pub const Renderer = struct {
             }
             drawableChunks.deinit(self.allocator);
         }
-        var pen = Pen.init(@as(f64, @floatFromInt(self.preset.horizontal_padding_px)) + 5.0, font_metrics.margin_x, font_metrics.margin_y + font_metrics.ascent, font_metrics.line_height);
+        var highlights = std.ArrayList(HighlightRect).empty;
+        errdefer highlights.deinit(self.allocator);
+
+        var pen = Pen.init(@as(f64, @floatFromInt(self.preset.horizontal_padding_px)) + 5.0, font_metrics.margin_x, font_metrics.margin_y + font_metrics.ascent, font_metrics.line_height, starting_line);
+
+        // Tracks the vertical extent (top/bottom of the glyph box) of the
+        // line currently being drawn, so a highlight rect can be emitted
+        // once the line is known to be finished - including every wrapped
+        // continuation row, which share the same line_num.
+        var current_line_top = pen.y - font_metrics.ascent;
+        var current_line_bottom = current_line_top + font_metrics.line_height;
 
         try drawableChunks.append(self.allocator, .{
             .x = pen.x,
             .y = pen.y,
-            .color = self.active_theme.ui.line_number,
+            .color = if (lineIsHighlighted(highlight_lines, pen.line_num)) self.active_theme.ui.foreground else self.active_theme.ui.line_number,
             .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
         });
         pen.positionAtTextStart();
@@ -166,12 +176,24 @@ pub const Renderer = struct {
             while (iterator.next()) |chunk| {
                 // Mostly helps with new lines
                 if (!first_part) {
+                    if (lineIsHighlighted(highlight_lines, pen.line_num)) {
+                        try highlights.append(self.allocator, .{
+                            .x = pad_x,
+                            .y = current_line_top,
+                            .w = self.content_width,
+                            .h = current_line_bottom - current_line_top,
+                        });
+                    }
+
                     pen.nextLine();
                     pen.positionAtNumStart();
+                    current_line_top = pen.y - font_metrics.ascent;
+                    current_line_bottom = current_line_top + font_metrics.line_height;
+
                     try drawableChunks.append(self.allocator, .{
                         .x = pen.x,
                         .y = pen.y,
-                        .color = self.active_theme.ui.line_number,
+                        .color = if (lineIsHighlighted(highlight_lines, pen.line_num)) self.active_theme.ui.foreground else self.active_theme.ui.line_number,
                         .text = std.fmt.allocPrint(self.allocator, "{d: >3}", .{pen.line_num}) catch "   ",
                     });
                     pen.positionAtTextStart();
@@ -194,6 +216,7 @@ pub const Renderer = struct {
                                 .color = self.active_theme.getColor(tree_sitter.TokenCategory.default_text),
                             });
                             pen.nextLineIndentation();
+                            current_line_bottom += font_metrics.line_height;
                             pen.positionAtTextStart();
 
                             try drawableChunks.append(self.allocator, .{
@@ -221,7 +244,16 @@ pub const Renderer = struct {
             }
         }
 
-        return drawableChunks;
+        if (lineIsHighlighted(highlight_lines, pen.line_num)) {
+            try highlights.append(self.allocator, .{
+                .x = pad_x,
+                .y = current_line_top,
+                .w = self.content_width,
+                .h = current_line_bottom - current_line_top,
+            });
+        }
+
+        return .{ .chunks = drawableChunks, .highlights = highlights };
     }
 
     pub fn drawChunks(self: *Renderer, chunks: []DrawableChunk) !void {
@@ -281,6 +313,14 @@ pub const Renderer = struct {
         }
         _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.code_window_background);
         _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_ROUND_RECT, &rect);
+    }
+
+    pub fn drawHighlights(self: *Renderer, rects: []const HighlightRect) void {
+        _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.highlight_background);
+        for (rects) |rect| {
+            const bl_rect = c.BLRect{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+            _ = c.bl_context_fill_geometry(&self.context, c.BL_GEOMETRY_TYPE_RECTD, &bl_rect);
+        }
     }
 
     // Fake blur by rendering multiple gray rectangles with decreasing alpha values as they spread out
@@ -429,6 +469,27 @@ const DrawableChunk = struct {
     text: []const u8 = "",
 };
 
+pub const HighlightRect = struct {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+};
+
+pub const PreparedChunks = struct {
+    chunks: std.ArrayList(DrawableChunk),
+    highlights: std.ArrayList(HighlightRect),
+};
+
+// `highlight_lines` is small and sorted (see cli.zig's parseHighlightSpec),
+// so a linear scan per line is fine.
+fn lineIsHighlighted(highlight_lines: []const usize, line_num: u32) bool {
+    for (highlight_lines) |line| {
+        if (line == line_num) return true;
+    }
+    return false;
+}
+
 // TODO might be better to remove the line logic? and starting positions? just to separate stuff
 const Pen = struct {
     x: f64,
@@ -440,14 +501,14 @@ const Pen = struct {
     line_num: u32,
     line_height: f32,
 
-    pub fn init(num_x: f64, text_x: f64, y: f64, line_height: f32) Pen {
+    pub fn init(num_x: f64, text_x: f64, y: f64, line_height: f32, starting_line: u32) Pen {
         return .{
             .x = num_x,
             .y = y,
             .num_starting_x = num_x,
             .text_starting_x = text_x,
             .starting_y = y,
-            .line_num = 1,
+            .line_num = starting_line,
             .line_height = line_height,
         };
     }

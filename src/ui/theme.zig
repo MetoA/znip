@@ -11,6 +11,7 @@ const Ui = struct {
     code_window_background: Color,
     foreground: Color,
     line_number: Color,
+    highlight_background: Color = 0x33FFFFFF,
 };
 
 const Syntax = struct {
@@ -153,6 +154,7 @@ pub const SolarizedLight = Theme {
         .code_window_background = 0xFFFDF6E3,
         .foreground = 0xFF657B83,
         .line_number = 0xFF93A1A1,
+        .highlight_background = 0x1F000000,
     },
     .syntax = .{
         .comment = 0xFF93A1A1,
@@ -182,6 +184,7 @@ pub const PaperWhite = Theme {
         .code_window_background = 0xFFFFFFFF,
         .foreground = 0xFF24292E,
         .line_number = 0xFFBBBBBB,
+        .highlight_background = 0x1F000000,
     },
     .syntax = .{
         .comment = 0xFF6A737D,

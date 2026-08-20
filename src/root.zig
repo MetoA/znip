@@ -12,7 +12,7 @@ pub const theme_module = @import("ui/theme.zig");
 pub const fonts_module = @import("util/fonts.zig");
 pub const output = @import("util/output.zig");
 
-pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8, preset: Preset, active_theme: theme.Theme, requested_lang: ?[]const u8, auto_confirm: bool) !void {
+pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint_path: ?[]const u8, preset: Preset, active_theme: theme.Theme, requested_lang: ?[]const u8, auto_confirm: bool, starting_line: u32, highlight_lines: []const usize) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
@@ -57,15 +57,17 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     defer tokens.deinit(arena_allocator);
 
     output.step("Rendering image...", .{});
-    var chunks = try renderer.prepareDrawableChunks(tokens.items);
-    defer chunks.deinit(arena_allocator);
-    const last_chunk_height: f64 = if (chunks.items.len > 0) chunks.getLast().y else 300.0;
+    var prepared = try renderer.prepareDrawableChunks(tokens.items, starting_line, highlight_lines);
+    defer prepared.chunks.deinit(arena_allocator);
+    defer prepared.highlights.deinit(arena_allocator);
+    const last_chunk_height: f64 = if (prepared.chunks.items.len > 0) prepared.chunks.getLast().y else 300.0;
     renderer.initImage(last_chunk_height);
     renderer.fillBackground();
     try renderer.drawCodeWindow(last_chunk_height);
+    renderer.drawHighlights(prepared.highlights.items);
     renderer.drawCodeWindowControls();
     renderer.drawFileName();
-    try renderer.drawChunks(chunks.items);
+    try renderer.drawChunks(prepared.chunks.items);
 
     output.step("Saving image...", .{});
     try renderer.saveImage(file_name);

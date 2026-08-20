@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const znip = @import("znip");
 const fonts = znip.fonts_module;
 const output = znip.output;
+const cli = @import("../core/cli.zig");
 
 const Preset = znip.config.Preset;
 
@@ -15,12 +16,14 @@ pub const Result = struct {
     preset: Preset,
     saved_as: ?[]const u8,
     output_name: ?[]const u8,
+    highlight_lines: ?[]usize,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         allocator.free(self.preset.theme);
         allocator.free(self.preset.font);
         if (self.preset.name) |name| allocator.free(name);
         if (self.output_name) |name| allocator.free(name);
+        if (self.highlight_lines) |lines| allocator.free(lines);
     }
 };
 
@@ -150,6 +153,24 @@ const Wizard = struct {
             }
         }
     }
+
+    /// Prompts for a highlight spec like "5,8-10"; blank input means no highlights.
+    fn highlightInput(self: *Wizard) !?[]usize {
+        var err_message: ?[]const u8 = null;
+        while (true) {
+            const raw = try self.textInput("Highlight line(s) (optional, e.g. 5,8-10)", null, err_message);
+            defer self.allocator.free(raw);
+
+            const trimmed = std.mem.trim(u8, raw, " \t");
+            if (trimmed.len == 0) return null;
+
+            if (cli.parseHighlightSpec(self.allocator, trimmed)) |lines| {
+                return lines;
+            } else |_| {
+                err_message = "Invalid format. Use e.g. 5,8-10.";
+            }
+        }
+    }
 };
 
 pub fn run(allocator: std.mem.Allocator) !Result {
@@ -209,6 +230,9 @@ pub fn run(allocator: std.mem.Allocator) !Result {
     };
     errdefer if (output_name) |name| allocator.free(name);
 
+    const highlight_lines = try wiz.highlightInput();
+    errdefer if (highlight_lines) |lines| allocator.free(lines);
+
     const save_options = [_][]const u8{ "Save as a named preset", "Use once for this run" };
     const save_choice = try wiz.selectOne("What would you like to do with this configuration?", &save_options);
 
@@ -238,5 +262,5 @@ pub fn run(allocator: std.mem.Allocator) !Result {
         };
     }
 
-    return Result{ .preset = preset, .saved_as = preset_name, .output_name = output_name };
+    return Result{ .preset = preset, .saved_as = preset_name, .output_name = output_name, .highlight_lines = highlight_lines };
 }

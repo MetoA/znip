@@ -163,8 +163,10 @@ pub fn main() !void {
     const active_theme = theme.getThemeByName(active_preset.theme);
 
     var code: ?[:0]u8 = null;
+    var line_offset: u32 = 1;
 
     if (cli_config.file_path) |file_path| {
+        line_offset = @intCast(cli_config.starting_line orelse 1);
         code = util_files.getLinesInRange(allocator, file_path, cli_config.starting_line, cli_config.ending_line) catch |err| switch (err) {
             error.FileNotFound => {
                 output.err("'{s}' doesn't exist.", .{file_path});
@@ -217,6 +219,19 @@ pub fn main() !void {
         return;
     }
 
+    const highlight_lines: ?[]const usize = if (wizard_result) |r| r.highlight_lines else cli_config.highlight_lines;
+
+    if (highlight_lines) |lines| {
+        const total_lines: u32 = @intCast(std.mem.count(u8, code.?, "\n") + 1);
+        const max_line = line_offset + total_lines - 1;
+        for (lines) |line| {
+            if (line < line_offset or line > max_line) {
+                output.err("Highlight line {d} is outside the rendered range ({d}-{d}).", .{ line, line_offset, max_line });
+                return;
+            }
+        }
+    }
+
     const base_name = if (wizard_result) |r| r.output_name else cli_config.output_name;
 
     const file_name = if (base_name) |name|
@@ -235,7 +250,7 @@ pub fn main() !void {
     defer allocator.free(output_path);
 
     if (code) |c| {
-        znip.renderImage(c, output_path, cli_config.file_path, active_preset, active_theme, cli_config.lang, cli_config.yes) catch |err| switch (err) {
+        znip.renderImage(c, output_path, cli_config.file_path, active_preset, active_theme, cli_config.lang, cli_config.yes, line_offset, highlight_lines orelse &[_]usize{}) catch |err| switch (err) {
             error.LanguageNotAvailable => {
                 output.err("Language '{s}' isn't available (not built in, not cached, and not found in the grammar manifest).", .{cli_config.lang.?});
                 return;

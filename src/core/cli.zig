@@ -6,6 +6,7 @@ pub const CLIConfig = struct {
     file_path: ?[]const u8 = null,
     starting_line: ?usize = null,
     ending_line: ?usize = null,
+    highlight_lines: ?[]usize = null,
     interactive: bool = false,
     from_clipboard: bool = false,
     to_clipboard: bool = false,
@@ -23,6 +24,7 @@ pub const CLIConfig = struct {
         if (self.install_lang) |install_lang| allocator.free(install_lang);
         if (self.output_dir) |output_dir| allocator.free(output_dir);
         if (self.output_name) |output_name| allocator.free(output_name);
+        if (self.highlight_lines) |lines| allocator.free(lines);
     }
 };
 
@@ -30,6 +32,7 @@ pub const params = clap.parseParamsComptime(
     \\-h, --help              Displays help and exits
     \\-s, --start <usize>     Specifies starting line of the file
     \\-e, --end <usize>       Specifies ending line of the file
+    \\    --highlight <str>   Highlight specific line(s), e.g. 5,8-10
     \\    --from-clipboard    Uses the text available in your clipboard
     \\    --to-clipboard      Copies the generated image to your clipboard
     \\-i, --interactive       Initiates an interactive step by step process of selecting various configurations
@@ -103,11 +106,16 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
         }
     }
 
+    const raw_highlight: ?[]const u8 = result.args.highlight;
+    const highlight_lines = if (raw_highlight) |h| try parseHighlightSpec(allocator, h) else null;
+    errdefer if (highlight_lines) |lines| allocator.free(lines);
+
     return CLIConfig{
         .help = false,
         .file_path = file_path,
         .starting_line = start,
         .ending_line = end,
+        .highlight_lines = highlight_lines,
         .from_clipboard = from_clipboard,
         .to_clipboard = result.args.@"to-clipboard" != 0,
         .interactive = result.args.interactive != 0,
@@ -116,6 +124,49 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
         .output_name = output_name,
         .yes = result.args.yes != 0,
     };
+}
+
+/// Parses a comma-separated highlight spec like "5,8-10" into a sorted,
+/// deduplicated list of 1-based line numbers.
+pub fn parseHighlightSpec(allocator: std.mem.Allocator, spec: []const u8) ![]usize {
+    var lines = std.ArrayList(usize).empty;
+    errdefer lines.deinit(allocator);
+
+    var segment_iterator = std.mem.splitScalar(u8, spec, ',');
+    while (segment_iterator.next()) |raw_segment| {
+        const segment = std.mem.trim(u8, raw_segment, " \t");
+        if (segment.len == 0) return error.InvalidHighlightSpec;
+
+        if (std.mem.indexOfScalar(u8, segment, '-')) |dash_index| {
+            const start_str = segment[0..dash_index];
+            const end_str = segment[dash_index + 1 ..];
+            const range_start = std.fmt.parseUnsigned(usize, start_str, 10) catch return error.InvalidHighlightSpec;
+            const range_end = std.fmt.parseUnsigned(usize, end_str, 10) catch return error.InvalidHighlightSpec;
+            if (range_start == 0 or range_end == 0 or range_end < range_start) return error.InvalidHighlightSpec;
+
+            var line = range_start;
+            while (line <= range_end) : (line += 1) {
+                try lines.append(allocator, line);
+            }
+        } else {
+            const line = std.fmt.parseUnsigned(usize, segment, 10) catch return error.InvalidHighlightSpec;
+            if (line == 0) return error.InvalidHighlightSpec;
+            try lines.append(allocator, line);
+        }
+    }
+
+    std.mem.sort(usize, lines.items, {}, std.sort.asc(usize));
+
+    var deduped = std.ArrayList(usize).empty;
+    errdefer deduped.deinit(allocator);
+    for (lines.items) |line| {
+        if (deduped.items.len == 0 or deduped.items[deduped.items.len - 1] != line) {
+            try deduped.append(allocator, line);
+        }
+    }
+    lines.deinit(allocator);
+
+    return deduped.toOwnedSlice(allocator);
 }
 
 pub fn help() !void {
