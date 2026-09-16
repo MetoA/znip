@@ -9,6 +9,7 @@ pub const CLIConfig = struct {
     highlight_lines: ?[]usize = null,
     interactive: bool = false,
     from_clipboard: bool = false,
+    from_stdin: bool = false,
     to_clipboard: bool = false,
     open: bool = false,
     preset: ?[]const u8 = null,
@@ -90,13 +91,14 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     errdefer if (output_name) |n| allocator.free(n);
 
     const from_clipboard = result.args.@"from-clipboard" != 0;
-    if (file_path != null and from_clipboard) {
-        return error.MultipleCodeSourcesNotSupported;
-    }
+    const from_stdin = !std.fs.File.stdin().isTty();
 
-    if (file_path == null and !from_clipboard) {
-        return error.NoInputProvided;
-    }
+    const source_count: u8 = @as(u8, @intFromBool(file_path != null)) +
+        @as(u8, @intFromBool(from_clipboard)) +
+        @as(u8, @intFromBool(from_stdin));
+
+    if (source_count > 1) return error.MultipleCodeSourcesNotSupported;
+    if (source_count == 0) return error.NoInputProvided;
 
     const start: ?usize = result.args.start;
     const end: ?usize = result.args.end;
@@ -119,6 +121,7 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
         .ending_line = end,
         .highlight_lines = highlight_lines,
         .from_clipboard = from_clipboard,
+        .from_stdin = from_stdin,
         .to_clipboard = result.args.@"to-clipboard" != 0,
         .open = result.args.open != 0,
         .interactive = result.args.interactive != 0,

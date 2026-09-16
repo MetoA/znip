@@ -55,11 +55,11 @@ pub fn main() !void {
             return;
         },
         error.MultipleCodeSourcesNotSupported => {
-            output.err("Please provide either a file path or --from-clipboard, not both.", .{});
+            output.err("Please provide only one input source: a file path, --from-clipboard, or piped stdin.", .{});
             return;
         },
         error.NoInputProvided => {
-            output.err("No input provided. Pass a file path or use --from-clipboard.", .{});
+            output.err("No input provided. Pass a file path, use --from-clipboard, or pipe code via stdin.", .{});
             return;
         },
         error.InvalidStartLine => {
@@ -207,6 +207,27 @@ pub fn main() !void {
         };
     }
 
+    if (cli_config.from_stdin) {
+        code = util_files.readStdin(allocator) catch |err| switch (err) {
+            error.BinaryFileNotSupported => {
+                output.err("Piped input looks like binary data, which isn't supported.", .{});
+                return;
+            },
+            error.EmptyFileNotSupported => {
+                output.err("No input received on stdin.", .{});
+                return;
+            },
+            error.FileTooBig => {
+                output.err("Piped input is too large (max 10MB).", .{});
+                return;
+            },
+            else => {
+                output.err("Couldn't read from stdin: {s}", .{@errorName(err)});
+                return;
+            },
+        };
+    }
+
     if (code) |c| {
         const trimmed = try util_indent.trimCommonIndent(allocator, c);
         allocator.free(c);
@@ -216,7 +237,7 @@ pub fn main() !void {
     defer if (code) |c| allocator.free(c);
 
     if (code == null) {
-        output.err("No code provided. Pass a file path or use --from-clipboard.", .{});
+        output.err("No code provided. Pass a file path, use --from-clipboard, or pipe code via stdin.", .{});
         return;
     }
 

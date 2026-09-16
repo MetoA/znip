@@ -46,6 +46,17 @@ pub fn getLinesInRange(
     return result;
 }
 
+pub fn readStdin(allocator: std.mem.Allocator) ![:0]u8 {
+    const max_bytes = 10 * 1024 * 1024; // 10MB
+    const content = try std.fs.File.stdin().readToEndAlloc(allocator, max_bytes);
+    defer allocator.free(content);
+
+    if (isBinary(content)) return error.BinaryFileNotSupported;
+    if (content.len == 0) return error.EmptyFileNotSupported;
+
+    return allocator.dupeZ(u8, content);
+}
+
 // Null bytes indicate binary
 fn isBinary(buffer: []const u8) bool {
     const check_size = @min(buffer.len, 4096);
