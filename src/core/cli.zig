@@ -13,6 +13,8 @@ pub const CLIConfig = struct {
     to_clipboard: bool = false,
     open: bool = false,
     preset: ?[]const u8 = null,
+    font: ?[]const u8 = null,
+    font_size: ?u32 = null,
     lang: ?[]const u8 = null,
     install_lang: ?[]const u8 = null,
     output_dir: ?[]const u8 = null,
@@ -22,6 +24,7 @@ pub const CLIConfig = struct {
     pub fn deinit(self: *CLIConfig, allocator: std.mem.Allocator) void {
         if (self.file_path) |path| allocator.free(path);
         if (self.preset) |preset| allocator.free(preset);
+        if (self.font) |font| allocator.free(font);
         if (self.lang) |lang| allocator.free(lang);
         if (self.install_lang) |install_lang| allocator.free(install_lang);
         if (self.output_dir) |output_dir| allocator.free(output_dir);
@@ -40,6 +43,8 @@ pub const params = clap.parseParamsComptime(
     \\-o, --open              Opens the generated image in your default viewer
     \\-i, --interactive       Initiates an interactive step by step process of selecting various configurations
     \\-p, --preset <str>      Use a specific preset for this run
+    \\    --font <str>        Override the font for this run (bypasses the preset's font)
+    \\    --font-size <u32>   Override the font size in px for this run (bypasses the preset's font size)
     \\-n, --name <str>        Sets the name of the saved output file (.png is appended if missing)
     \\    --lang <str>        Explicit language override, bypasses automatic detection
     \\    --install-lang <str> Fetches and caches a WASM grammar for the given language, then exits
@@ -81,6 +86,10 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     const raw_preset: ?[]const u8 = result.args.preset;
     const preset = if (raw_preset) |p| try allocator.dupe(u8, p) else null;
     errdefer if (preset) |pr| allocator.free(pr);
+
+    const raw_font: ?[]const u8 = result.args.font;
+    const font = if (raw_font) |f| try allocator.dupe(u8, f) else null;
+    errdefer if (font) |f| allocator.free(f);
 
     const raw_lang: ?[]const u8 = result.args.lang;
     const lang = if (raw_lang) |l| try allocator.dupe(u8, l) else null;
@@ -126,6 +135,8 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
         .open = result.args.open != 0,
         .interactive = result.args.interactive != 0,
         .preset = preset,
+        .font = font,
+        .font_size = result.args.@"font-size",
         .lang = lang,
         .output_name = output_name,
         .yes = result.args.yes != 0,

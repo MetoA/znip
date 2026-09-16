@@ -138,7 +138,7 @@ pub fn main() !void {
     var parsed_preset: ?std.json.Parsed(config.Preset) = null;
     defer if (parsed_preset) |*p| p.deinit();
 
-    const active_preset: config.Preset = blk: {
+    var active_preset: config.Preset = blk: {
         if (cli_config.interactive) {
             wizard_result = wizard.run(allocator) catch |err| switch (err) {
                 error.WizardCancelled => {
@@ -160,6 +160,11 @@ pub fn main() !void {
         };
         break :blk parsed_preset.?.value;
     };
+
+    // Run-scoped overrides: unlike --preset (which selects a saved,
+    // persisted preset), these only apply to this invocation.
+    if (cli_config.font) |font| active_preset.font = font;
+    if (cli_config.font_size) |font_size| active_preset.font_size = font_size;
 
     const active_theme = theme.getThemeByName(active_preset.theme);
 
@@ -304,4 +309,13 @@ pub fn main() !void {
             output.err("Couldn't open '{s}': {s}", .{ output_path, @errorName(err) });
         };
     }
+}
+
+test {
+    // Zig only discovers `test` blocks in files that actually get analyzed;
+    // merely `@import`ing a file (as above) isn't enough - see root.zig's
+    // identical use of refAllDecls for tree_sitter/grammar_cache. This is the
+    // exe-side counterpart, for wizard.zig's tests, which would otherwise
+    // never run.
+    std.testing.refAllDecls(wizard);
 }

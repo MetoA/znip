@@ -33,6 +33,34 @@ const Line = struct {
     owned: bool = false,
 };
 
+const known_font_styles = [_][]const u8{ "-BoldItalic", "-Bold", "-Italic", "-Regular" };
+
+/// Strips a trailing style suffix (e.g. "-Bold") so same-family font files
+/// can be grouped together in the picker.
+fn fontFamilyName(name: []const u8) []const u8 {
+    for (known_font_styles) |suffix| {
+        if (name.len > suffix.len and std.ascii.eqlIgnoreCase(name[name.len - suffix.len ..], suffix)) {
+            return name[0 .. name.len - suffix.len];
+        }
+    }
+    return name;
+}
+
+fn fontSourceLabel(source: fonts.FontSource) []const u8 {
+    return switch (source) {
+        .bundled => "bundled",
+        .user => "user",
+        .extra => "your-dir",
+        .system => "system",
+    };
+}
+
+const FontFamily = struct {
+    family_name: []const u8,
+    source: fonts.FontSource,
+    members: std.ArrayList(usize),
+};
+
 const Wizard = struct {
     allocator: std.mem.Allocator,
     tty: *vaxis.Tty,
@@ -62,9 +90,39 @@ const Wizard = struct {
         return key.matches('c', .{ .ctrl = true }) or key.matches(vaxis.Key.escape, .{});
     }
 
+    /// Fixed rows reserved by `selectOne` around the scrollable option list:
+    /// title, blank, top scroll-indicator, bottom scroll-indicator, blank,
+    /// footer.
+    const select_one_chrome_rows = 6;
+
+    const ScrollWindow = struct {
+        scroll_offset: usize,
+        visible_count: usize,
+    };
+
+    /// Pure scroll-viewport math for `selectOne`, factored out so it can be
+    /// unit tested without a live terminal: keeps `idx` within
+    /// `[scroll_offset, scroll_offset + visible_count)`, scrolling by the
+    /// minimum amount needed, and clamps to the list's actual bounds.
+    fn computeScrollWindow(idx: usize, options_len: usize, available_rows: u16, scroll_offset_in: usize) ScrollWindow {
+        const visible_count = @max(available_rows -| select_one_chrome_rows, 1);
+        var scroll_offset = scroll_offset_in;
+        if (idx < scroll_offset) scroll_offset = idx;
+        if (idx >= scroll_offset + visible_count) scroll_offset = idx - visible_count + 1;
+        scroll_offset = @min(scroll_offset, options_len -| visible_count);
+        return .{ .scroll_offset = scroll_offset, .visible_count = visible_count };
+    }
+
     fn selectOne(self: *Wizard, title: []const u8, options: []const []const u8) !usize {
         var idx: usize = 0;
+        var scroll_offset: usize = 0;
         while (true) {
+            const window = computeScrollWindow(idx, options.len, self.vx.window().height, scroll_offset);
+            scroll_offset = window.scroll_offset;
+            const visible_count = window.visible_count;
+
+            const window_end = @min(scroll_offset + visible_count, options.len);
+
             var lines = std.ArrayList(Line).empty;
             defer {
                 for (lines.items) |line| if (line.owned) self.allocator.free(line.text);
@@ -73,7 +131,18 @@ const Wizard = struct {
 
             try lines.append(self.allocator, .{ .text = title, .style = .{ .bold = true } });
             try lines.append(self.allocator, .{ .text = "" });
-            for (options, 0..) |option, i| {
+
+            if (scroll_offset > 0) {
+                try lines.append(self.allocator, .{
+                    .text = try std.fmt.allocPrint(self.allocator, "↑ {d} more above", .{scroll_offset}),
+                    .style = .{ .dim = true },
+                    .owned = true,
+                });
+            } else {
+                try lines.append(self.allocator, .{ .text = "" });
+            }
+
+            for (options[scroll_offset..window_end], scroll_offset..) |option, i| {
                 const marker = if (i == idx) "> " else "  ";
                 const text = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ marker, option });
                 try lines.append(self.allocator, .{
@@ -82,8 +151,20 @@ const Wizard = struct {
                     .owned = true,
                 });
             }
+
+            const remaining_below = options.len - window_end;
+            if (remaining_below > 0) {
+                try lines.append(self.allocator, .{
+                    .text = try std.fmt.allocPrint(self.allocator, "↓ {d} more below", .{remaining_below}),
+                    .style = .{ .dim = true },
+                    .owned = true,
+                });
+            } else {
+                try lines.append(self.allocator, .{ .text = "" });
+            }
+
             try lines.append(self.allocator, .{ .text = "" });
-            try lines.append(self.allocator, .{ .text = "up/down to move, enter to select, ctrl+c to cancel", .style = .{ .dim = true } });
+            try lines.append(self.allocator, .{ .text = "up/down to move, pgup/pgdn to jump, enter to select, ctrl+c to cancel", .style = .{ .dim = true } });
 
             try self.render(lines.items);
 
@@ -92,6 +173,10 @@ const Wizard = struct {
                 idx = if (idx == 0) options.len - 1 else idx - 1;
             } else if (key.matches(vaxis.Key.down, .{}) or key.matches('j', .{})) {
                 idx = if (idx + 1 == options.len) 0 else idx + 1;
+            } else if (key.matches(vaxis.Key.page_up, .{})) {
+                idx = idx -| visible_count;
+            } else if (key.matches(vaxis.Key.page_down, .{})) {
+                idx = @min(idx + visible_count, options.len - 1);
             } else if (key.matches(vaxis.Key.enter, .{})) {
                 return idx;
             } else if (isCancel(key)) {
@@ -200,13 +285,60 @@ pub fn run(allocator: std.mem.Allocator) !Result {
     const theme_name = try allocator.dupe(u8, theme_names.items[theme_idx]);
     errdefer allocator.free(theme_name);
 
-    const font_names = try fonts.listAvailableFontNames(allocator);
+    const font_entries = try fonts.listAvailableFonts(allocator);
+    defer fonts.freeFontEntries(allocator, font_entries);
+
+    var families = std.ArrayList(FontFamily).empty;
     defer {
-        for (font_names) |name| allocator.free(name);
-        allocator.free(font_names);
+        for (families.items) |*fam| fam.members.deinit(allocator);
+        families.deinit(allocator);
     }
-    const font_idx = try wiz.selectOne("Select a font", font_names);
-    const font_name = try allocator.dupe(u8, font_names[font_idx]);
+    for (font_entries, 0..) |entry, i| {
+        const family_name = fontFamilyName(entry.name);
+        var found = false;
+        for (families.items) |*fam| {
+            if (std.mem.eql(u8, fam.family_name, family_name)) {
+                try fam.members.append(allocator, i);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            var members = std.ArrayList(usize).empty;
+            try members.append(allocator, i);
+            try families.append(allocator, .{ .family_name = family_name, .source = entry.source, .members = members });
+        }
+    }
+
+    var family_labels = std.ArrayList([]const u8).empty;
+    defer {
+        for (family_labels.items) |label| allocator.free(label);
+        family_labels.deinit(allocator);
+    }
+    for (families.items) |fam| {
+        try family_labels.append(allocator, try std.fmt.allocPrint(allocator, "[{s}] {s}", .{ fontSourceLabel(fam.source), fam.family_name }));
+    }
+
+    const family_idx = try wiz.selectOne("Select a font", family_labels.items);
+    const family = families.items[family_idx];
+
+    const font_name = blk: {
+        if (family.members.items.len == 1) {
+            break :blk try allocator.dupe(u8, font_entries[family.members.items[0]].name);
+        }
+
+        var style_labels = std.ArrayList([]const u8).empty;
+        defer {
+            for (style_labels.items) |label| allocator.free(label);
+            style_labels.deinit(allocator);
+        }
+        for (family.members.items) |idx| {
+            try style_labels.append(allocator, try allocator.dupe(u8, font_entries[idx].name));
+        }
+
+        const style_idx = try wiz.selectOne("Select a style", style_labels.items);
+        break :blk try allocator.dupe(u8, font_entries[family.members.items[style_idx]].name);
+    };
     errdefer allocator.free(font_name);
 
     const font_size = try wiz.numberInput("Font size (px)", 16);
@@ -263,4 +395,35 @@ pub fn run(allocator: std.mem.Allocator) !Result {
     }
 
     return Result{ .preset = preset, .saved_as = preset_name, .output_name = output_name, .highlight_lines = highlight_lines };
+}
+
+test "computeScrollWindow keeps the whole list visible when it already fits" {
+    const window = Wizard.computeScrollWindow(2, 3, 20, 0);
+    try std.testing.expectEqual(@as(usize, 0), window.scroll_offset);
+    try std.testing.expect(window.visible_count >= 3);
+}
+
+test "computeScrollWindow scrolls down by the minimum amount to keep idx visible" {
+    // available_rows=10 -> visible_count = 10 - 6 = 4
+    const window = Wizard.computeScrollWindow(5, 100, 10, 0);
+    try std.testing.expectEqual(@as(usize, 4), window.visible_count);
+    try std.testing.expectEqual(@as(usize, 2), window.scroll_offset);
+    try std.testing.expect(5 >= window.scroll_offset and 5 < window.scroll_offset + window.visible_count);
+}
+
+test "computeScrollWindow scrolls up when idx moves above the current window" {
+    const window = Wizard.computeScrollWindow(1, 100, 10, 2);
+    try std.testing.expectEqual(@as(usize, 1), window.scroll_offset);
+}
+
+test "computeScrollWindow clamps to the last page at the end of the list" {
+    // available_rows=10 -> visible_count=4; last valid idx is 99.
+    const window = Wizard.computeScrollWindow(99, 100, 10, 50);
+    try std.testing.expectEqual(@as(usize, 96), window.scroll_offset);
+    try std.testing.expect(99 >= window.scroll_offset and 99 < window.scroll_offset + window.visible_count);
+}
+
+test "computeScrollWindow never returns a zero-sized viewport on a tiny terminal" {
+    const window = Wizard.computeScrollWindow(0, 100, 3, 0);
+    try std.testing.expectEqual(@as(usize, 1), window.visible_count);
 }

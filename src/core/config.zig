@@ -15,6 +15,7 @@ pub const Preset = struct {
 pub const Config = struct {
     active_preset: []const u8,
     output_directory: ?[]const u8 = null,
+    font_directories: ?[]const []const u8 = null,
 
     pub fn load(allocator: std.mem.Allocator) !std.json.Parsed(Config) {
         const path = try configPath(allocator);
@@ -151,7 +152,7 @@ const preset_default =
 \\{
 \\  "name": "default",
 \\  "theme": "One Darker",
-\\  "font": "JetBrainsMono-Bold.ttf",
+\\  "font": "JetBrainsMono-Bold",
 \\  "font_size": 16,
 \\  "window_controls": true,
 \\  "show_file_name": true,
