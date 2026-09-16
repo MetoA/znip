@@ -11,6 +11,7 @@ pub const CLIConfig = struct {
     from_clipboard: bool = false,
     from_stdin: bool = false,
     to_clipboard: bool = false,
+    transparent: bool = false,
     open: bool = false,
     preset: ?[]const u8 = null,
     font: ?[]const u8 = null,
@@ -40,6 +41,7 @@ pub const params = clap.parseParamsComptime(
     \\    --highlight <str>   Highlight specific line(s), e.g. 5,8-10
     \\    --from-clipboard    Uses the text available in your clipboard
     \\    --to-clipboard      Copies the generated image to your clipboard
+    \\    --transparent       Make the outer canvas transparent (the code window itself stays opaque)
     \\-o, --open              Opens the generated image in your default viewer
     \\-i, --interactive       Initiates an interactive step by step process of selecting various configurations
     \\-p, --preset <str>      Use a specific preset for this run
@@ -132,6 +134,7 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
         .from_clipboard = from_clipboard,
         .from_stdin = from_stdin,
         .to_clipboard = result.args.@"to-clipboard" != 0,
+        .transparent = result.args.transparent != 0,
         .open = result.args.open != 0,
         .interactive = result.args.interactive != 0,
         .preset = preset,

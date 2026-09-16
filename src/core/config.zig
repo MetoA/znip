@@ -10,6 +10,7 @@ pub const Preset = struct {
     vertical_padding_px: u32,
     horizontal_padding_px: u32,
     include_drop_shadow: bool,
+    transparent_background: bool = false,
 };
 
 pub const Config = struct {
@@ -158,7 +159,8 @@ const preset_default =
 \\  "show_file_name": true,
 \\  "vertical_padding_px": 50,
 \\  "horizontal_padding_px": 50,
-\\  "include_drop_shadow": true
+\\  "include_drop_shadow": true,
+\\  "transparent_background": false
 \\}
 \\
 ;

@@ -292,6 +292,7 @@ pub const Renderer = struct {
     }
 
     pub fn fillBackground(self: *Renderer) void {
+        if (self.preset.transparent_background) return;
         _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.background);
         _ = c.bl_context_fill_all(&self.context);
     }

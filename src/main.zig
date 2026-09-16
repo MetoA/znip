@@ -165,6 +165,7 @@ pub fn main() !void {
     // persisted preset), these only apply to this invocation.
     if (cli_config.font) |font| active_preset.font = font;
     if (cli_config.font_size) |font_size| active_preset.font_size = font_size;
+    if (cli_config.transparent) active_preset.transparent_background = true;
 
     const active_theme = theme.getThemeByName(active_preset.theme);
 

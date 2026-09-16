@@ -347,6 +347,7 @@ pub fn run(allocator: std.mem.Allocator) !Result {
     const vertical_padding_px = try wiz.numberInput("Vertical padding (px)", 50);
     const horizontal_padding_px = try wiz.numberInput("Horizontal padding (px)", 50);
     const include_drop_shadow = try wiz.confirm("Include drop shadow?", true);
+    const transparent_background = try wiz.confirm("Transparent background (canvas only, window stays opaque)?", false);
 
     const raw_output_name = try wiz.textInput("File name (optional, press enter for default)", null, null);
     const output_name: ?[]const u8 = blk: {
@@ -385,6 +386,7 @@ pub fn run(allocator: std.mem.Allocator) !Result {
         .vertical_padding_px = vertical_padding_px,
         .horizontal_padding_px = horizontal_padding_px,
         .include_drop_shadow = include_drop_shadow,
+        .transparent_background = transparent_background,
     };
 
     if (preset_name) |name| {
