@@ -6,6 +6,7 @@ const theme = znip.theme_module;
 const util_files = @import("util/files.zig");
 const util_indent = @import("util/indent.zig");
 const clipboard = @import("clipboard/clipboard.zig");
+const opener = @import("util/opener.zig");
 const wizard = @import("interactive/wizard.zig");
 const output = znip.output;
 
@@ -275,5 +276,11 @@ pub fn main() !void {
             return;
         };
         output.ok("Copied to clipboard.", .{});
+    }
+
+    if (cli_config.open) {
+        opener.open(allocator, output_path) catch |err| {
+            output.err("Couldn't open '{s}': {s}", .{ output_path, @errorName(err) });
+        };
     }
 }
