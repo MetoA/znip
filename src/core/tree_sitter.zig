@@ -384,7 +384,16 @@ pub const Parser = struct {
 
                 var name_len: u32 = 0;
                 const name_ptr = c.ts_query_capture_name_for_id(query, capture.index, &name_len);
-                const capture_name = try self.allocator.dupe(u8, name_ptr[0..name_len]); // @variable, @type, @constant...
+                const raw_name = name_ptr[0..name_len];
+
+                // "spell" isn't a real highlight group - it's a Neovim
+                // spell-check marker that some grammars attach alongside a
+                // real capture on the same node (e.g. `(comment) @comment
+                // @spell`). Left in, it'd be a same-range duplicate that can
+                // shadow the real capture and fall back to .default_text.
+                if (std.mem.eql(u8, raw_name, "spell")) continue;
+
+                const capture_name = try self.allocator.dupe(u8, raw_name); // @variable, @type, @constant...
                 errdefer self.allocator.free(capture_name);
 
                 try matches.append(self.allocator, .{
@@ -430,12 +439,20 @@ pub const Parser = struct {
             }
         }
 
+        // A recognized file extension, fenced-code-block tag, or shebang is
+        // an explicit, unambiguous signal - trust it outright instead of
+        // letting the content-based heuristic below potentially override
+        // it. That heuristic exists for input with no such signal at all
+        // (piped stdin/clipboard content); scoring a file's own correct
+        // grammar against every other one can otherwise lose, since a
+        // comment-heavy file's prose can make an unrelated grammar's much
+        // more fragmented error recovery look artificially "richer" by raw
+        // named-node count than the correct grammar's clean parse.
+        if (extension_lang orelse fence_lang orelse shebang_lang) |lang| return .{ .native = lang };
+
         var candidates = std.ArrayList(NativeLanguageId).empty;
         defer candidates.deinit(self.allocator);
 
-        if (extension_lang) |lang| try appendCandidate(self.allocator, &candidates, lang);
-        if (fence_lang) |lang| try appendCandidate(self.allocator, &candidates, lang);
-        if (shebang_lang) |lang| try appendCandidate(self.allocator, &candidates, lang);
         for (native_languages) |lang| {
             try appendCandidate(self.allocator, &candidates, lang);
         }
@@ -443,8 +460,10 @@ pub const Parser = struct {
         const parser = c.ts_parser_new() orelse return error.ParserInitFailed;
         defer c.ts_parser_delete(parser);
 
-        var best_lang: NativeLanguageId = extension_lang orelse fence_lang orelse shebang_lang orelse .zig;
+        var best_lang: NativeLanguageId = .zig;
+        var best_stats: TreeStats = .{};
         var best_score: f64 = -1e9;
+        var have_best = false;
 
         for (candidates.items) |candidate| {
             _ = c.ts_parser_set_language(parser, nativeLanguagePtr(candidate));
@@ -454,13 +473,11 @@ pub const Parser = struct {
             const root = c.ts_tree_root_node(tree);
             var stats = TreeStats{};
             collectTreeStats(root, 1, &stats);
-            var score = computeScore(stats);
+            const score = computeScore(stats);
 
-            if (extension_lang != null and candidate == extension_lang.?) score += 140.0;
-            if (fence_lang != null and candidate == fence_lang.?) score += 180.0;
-            if (shebang_lang != null and candidate == shebang_lang.?) score += 160.0;
-
-            if (score > best_score) {
+            if (!have_best or isBetterCandidate(stats, score, best_stats, best_score)) {
+                have_best = true;
+                best_stats = stats;
                 best_score = score;
                 best_lang = candidate;
             }
@@ -546,19 +563,33 @@ pub const Parser = struct {
         }
     }
 
+    // A pure "richness" measure - used only to rank among candidates that
+    // are already comparably clean (see isBetterCandidate). It intentionally
+    // doesn't penalize errors/missing nodes itself: that's handled up front,
+    // lexicographically, because a badly-fragmented wrong-grammar parse can
+    // rack up far more named nodes than a small, correct, clean one, and a
+    // flat additive penalty here isn't enough to make up that gap.
     fn computeScore(stats: TreeStats) f64 {
         const named = @as(f64, @floatFromInt(stats.named_nodes));
         const total = @as(f64, @floatFromInt(stats.total_nodes));
-        const error_nodes = @as(f64, @floatFromInt(stats.error_nodes));
-        const missing_nodes = @as(f64, @floatFromInt(stats.missing_nodes));
         const depth = @as(f64, @floatFromInt(stats.max_depth));
         const named_ratio = if (stats.total_nodes > 0) named / total else 0.0;
 
-        var score = 2.0 * named + 1.0 * depth + 80.0 * named_ratio;
-        if (stats.has_error) score -= 150.0;
-        score -= 14.0 * error_nodes;
-        score -= 8.0 * missing_nodes;
-        return score;
+        return 2.0 * named + 1.0 * depth + 80.0 * named_ratio;
+    }
+
+    // Prefers a cleaner parse over a merely more voluminous one: a grammar
+    // that parses the input with zero errors is almost certainly the right
+    // one, even if a wrong grammar's error-recovery fragmented the input
+    // into more (bogus) named nodes and would otherwise win on raw score.
+    fn isBetterCandidate(a_stats: TreeStats, a_score: f64, b_stats: TreeStats, b_score: f64) bool {
+        if (a_stats.has_error != b_stats.has_error) return !a_stats.has_error;
+
+        const a_defects = a_stats.error_nodes + a_stats.missing_nodes;
+        const b_defects = b_stats.error_nodes + b_stats.missing_nodes;
+        if (a_defects != b_defects) return a_defects < b_defects;
+
+        return a_score > b_score;
     }
 
     fn languagePtr(language: LanguageRef) *const c.TSLanguage {
@@ -661,6 +692,18 @@ pub const Parser = struct {
     }
 
     pub fn sourceCodeTokens(self: *Parser, matches: std.ArrayList(Match)) !std.ArrayList(Token) {
+        // ts_query_cursor_next_match doesn't guarantee matches come out
+        // ordered by position - the merge below does a single forward sweep
+        // and relies on that ordering, so sort first. Ties (same start_byte)
+        // put the wider capture first, so a narrower nested/duplicate one
+        // starting at the same byte gets shadowed by the dedup check below.
+        std.mem.sort(Match, matches.items, {}, struct {
+            fn lessThan(_: void, a: Match, b: Match) bool {
+                if (a.start_byte != b.start_byte) return a.start_byte < b.start_byte;
+                return a.end_byte > b.end_byte;
+            }
+        }.lessThan);
+
         var tokens = std.ArrayList(Token).empty;
         errdefer {
             for (tokens.items) |t| {
