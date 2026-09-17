@@ -1,4 +1,5 @@
 const std = @import("std");
+const theme = @import("../ui/theme.zig");
 
 pub const Preset = struct {
     name: ?[]const u8,
@@ -96,6 +97,98 @@ fn readPresetFile(allocator: std.mem.Allocator, name: []const u8) !std.json.Pars
     defer allocator.free(data);
 
     return try std.json.parseFromSlice(Preset, allocator, data, .{ .allocate = .alloc_always });
+}
+
+pub fn userThemesDirPath(allocator: std.mem.Allocator) ![]const u8 {
+    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    defer allocator.free(home);
+
+    return try std.fs.path.join(allocator, &[_][]const u8{ home, ".znip", "themes" });
+}
+
+pub fn userThemePath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const dir = try userThemesDirPath(allocator);
+    defer allocator.free(dir);
+
+    const base = try std.fs.path.join(allocator, &[_][]const u8{ dir, name });
+    defer allocator.free(base);
+
+    return try std.mem.concat(allocator, u8, &[_][]const u8{ base, ".json" });
+}
+
+fn readUserThemeFile(allocator: std.mem.Allocator, name: []const u8) !std.json.Parsed(theme.Theme) {
+    const path = try userThemePath(allocator, name);
+    defer allocator.free(path);
+
+    const data = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+    defer allocator.free(data);
+
+    return try std.json.parseFromSlice(theme.Theme, allocator, data, .{ .allocate = .alloc_always });
+}
+
+/// Writes `t` to `~/.znip/themes/<name>.json`. Refuses to overwrite an
+/// existing file unless `force` is true. Returns the allocated absolute
+/// path on success (caller frees).
+pub fn saveUserTheme(allocator: std.mem.Allocator, name: []const u8, t: theme.Theme, force: bool) ![]const u8 {
+    const path = try userThemePath(allocator, name);
+    errdefer allocator.free(path);
+
+    const json_data = try std.json.Stringify.valueAlloc(allocator, t, .{ .whitespace = .indent_2 });
+    defer allocator.free(json_data);
+
+    const file = std.fs.createFileAbsolute(path, .{ .exclusive = !force }) catch |err| {
+        if (err == error.PathAlreadyExists) return error.ThemeAlreadyExists;
+        return err;
+    };
+    defer file.close();
+
+    try file.writeAll(json_data);
+
+    return path;
+}
+
+/// Filename stems (without `.json`) of every theme file in
+/// `~/.znip/themes`. Returns an empty slice if the directory doesn't exist.
+/// Caller frees each name and the slice.
+pub fn listUserThemeNames(allocator: std.mem.Allocator) ![]const []const u8 {
+    const dir_path = try userThemesDirPath(allocator);
+    defer allocator.free(dir_path);
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return &[_][]const u8{},
+        else => return err,
+    };
+    defer dir.close();
+
+    var names = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+        try names.append(allocator, try allocator.dupe(u8, entry.name[0 .. entry.name.len - 5]));
+    }
+
+    return names.toOwnedSlice(allocator);
+}
+
+/// Resolves `name` to a theme, checking `~/.znip/themes/<name>.json` first
+/// (so a user file can shadow a builtin of the same name), then builtins.
+/// Returns error.ThemeNotFound if neither matches.
+pub fn resolveTheme(allocator: std.mem.Allocator, name: []const u8) !theme.ThemeHandle {
+    if (readUserThemeFile(allocator, name)) |parsed| {
+        return .{ .owned = parsed };
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    if (theme.findBuiltin(name)) |t| return .{ .static = t };
+    return error.ThemeNotFound;
 }
 
 pub fn createRootConfigDirectories(allocator: std.mem.Allocator) !void {

@@ -258,6 +258,33 @@ const Wizard = struct {
     }
 };
 
+/// Opens a standalone terminal session and runs a single `selectOne` picker,
+/// returning the chosen index. Mirrors `run()`'s session setup/teardown
+/// exactly (same locals, same defer order) rather than factoring it into a
+/// shared helper - `vaxis.Tty.init(&tty_buf)` and the later `&tty`/`&vx`
+/// references need `tty_buf`/`tty`/`vx` to keep a stable address for the
+/// whole session, which a helper returning them by value would break.
+pub fn selectFromList(allocator: std.mem.Allocator, title: []const u8, options: []const []const u8) !usize {
+    var tty_buf: [1024]u8 = undefined;
+    var tty = try vaxis.Tty.init(&tty_buf);
+    defer tty.deinit();
+
+    var vx = try vaxis.init(allocator, .{});
+    defer vx.deinit(allocator, tty.writer());
+
+    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx };
+    try loop.init();
+    try loop.start();
+    defer loop.stop();
+
+    try vx.enterAltScreen(tty.writer());
+    defer vx.exitAltScreen(tty.writer()) catch {};
+    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
+
+    var wiz = Wizard{ .allocator = allocator, .tty = &tty, .vx = &vx, .loop = &loop };
+    return try wiz.selectOne(title, options);
+}
+
 pub fn run(allocator: std.mem.Allocator) !Result {
     var tty_buf: [1024]u8 = undefined;
     var tty = try vaxis.Tty.init(&tty_buf);

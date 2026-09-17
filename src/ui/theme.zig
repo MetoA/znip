@@ -3,6 +3,94 @@ const tree_sitter = @import("../core/tree_sitter.zig");
 
 const Color = u32; // ARGB
 
+/// Formats `c` as `#rrggbb` (alpha dropped when fully opaque) or `#rrggbbaa`
+/// (alpha preserved otherwise) into `buf`, which must be at least 10 bytes.
+pub fn colorToHex(buf: []u8, c: Color) []const u8 {
+    const a: u8 = @truncate((c >> 24) & 0xFF);
+    const r: u8 = @truncate((c >> 16) & 0xFF);
+    const g: u8 = @truncate((c >> 8) & 0xFF);
+    const b: u8 = @truncate(c & 0xFF);
+
+    return if (a == 0xFF)
+        std.fmt.bufPrint(buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ r, g, b }) catch unreachable
+    else
+        std.fmt.bufPrint(buf, "#{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ r, g, b, a }) catch unreachable;
+}
+
+/// Parses `#rrggbb` (alpha assumed `0xFF`) or `#rrggbbaa`. Anything else,
+/// including a missing `#`, is `error.InvalidCharacter` - one of
+/// `std.json.ParseError`'s members, since this also runs as part of
+/// `jsonParse`, whose return type is fixed to that error set.
+pub fn colorFromHex(s: []const u8) !Color {
+    if (s.len == 0 or s[0] != '#') return error.InvalidCharacter;
+    const digits = s[1..];
+
+    return switch (digits.len) {
+        6 => blk: {
+            const rgb = try std.fmt.parseUnsigned(u32, digits, 16);
+            break :blk 0xFF000000 | rgb;
+        },
+        8 => blk: {
+            const rgba = try std.fmt.parseUnsigned(u32, digits, 16);
+            const r = (rgba >> 24) & 0xFF;
+            const g = (rgba >> 16) & 0xFF;
+            const b = (rgba >> 8) & 0xFF;
+            const a = rgba & 0xFF;
+            break :blk (a << 24) | (r << 16) | (g << 8) | b;
+        },
+        else => error.InvalidCharacter,
+    };
+}
+
+/// Shared by `Ui.jsonStringify`/`Syntax.jsonStringify`: writes every field as
+/// a hex-string color, skipping unset optional fields entirely rather than
+/// emitting `null`.
+fn jsonStringifyColors(comptime T: type, self: T, jws: anytype) !void {
+    try jws.beginObject();
+    inline for (std.meta.fields(T)) |field| {
+        const maybe_color: ?Color = @field(self, field.name);
+        if (maybe_color) |c| {
+            try jws.objectField(field.name);
+            var buf: [10]u8 = undefined;
+            try jws.write(colorToHex(&buf, c));
+        }
+    }
+    try jws.endObject();
+}
+
+/// Shared by `Ui.jsonParseFromValue`/`Syntax.jsonParseFromValue`: reads every
+/// field from a hex-string color, falling back to the field's own Zig-level
+/// default (or `error.MissingField` if it has none) when absent.
+fn jsonParseColorsFromValue(comptime T: type, source: std.json.Value) !T {
+    if (source != .object) return error.UnexpectedToken;
+
+    var r: T = undefined;
+    var fields_seen = [_]bool{false} ** std.meta.fields(T).len;
+
+    inline for (std.meta.fields(T), 0..) |field, i| {
+        if (source.object.get(field.name)) |v| {
+            const hex = switch (v) {
+                .string => |s| s,
+                else => return error.UnexpectedToken,
+            };
+            @field(r, field.name) = try colorFromHex(hex);
+            fields_seen[i] = true;
+        }
+    }
+
+    inline for (std.meta.fields(T), 0..) |field, i| {
+        if (!fields_seen[i]) {
+            if (field.defaultValue()) |default| {
+                @field(r, field.name) = default;
+            } else {
+                return error.MissingField;
+            }
+        }
+    }
+
+    return r;
+}
+
 const Ui = struct {
     window_close: Color = 0xFFFF5F56,
     window_minimize: Color = 0xFFFFBD2E,
@@ -12,6 +100,21 @@ const Ui = struct {
     foreground: Color,
     line_number: Color,
     highlight_background: Color = 0x33FFFFFF,
+
+    pub fn jsonStringify(self: Ui, jws: anytype) !void {
+        try jsonStringifyColors(Ui, self, jws);
+    }
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Ui {
+        const value = try std.json.Value.jsonParse(allocator, source, options);
+        return try jsonParseFromValue(allocator, value, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !Ui {
+        _ = allocator;
+        _ = options;
+        return try jsonParseColorsFromValue(Ui, source);
+    }
 };
 
 const Syntax = struct {
@@ -47,6 +150,21 @@ const Syntax = struct {
     variable_builtin: ?Color = null,
     variable_member: ?Color = null,
     variable_parameter: ?Color = null,
+
+    pub fn jsonStringify(self: Syntax, jws: anytype) !void {
+        try jsonStringifyColors(Syntax, self, jws);
+    }
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Syntax {
+        const value = try std.json.Value.jsonParse(allocator, source, options);
+        return try jsonParseFromValue(allocator, value, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !Syntax {
+        _ = allocator;
+        _ = options;
+        return try jsonParseColorsFromValue(Syntax, source);
+    }
 };
 
 pub const Theme = struct {
@@ -213,12 +331,37 @@ pub const builtin_themes = [_]Theme{
     PaperWhite,
 };
 
-pub fn getThemeByName(name: []const u8) Theme {
-    for (builtin_themes) |theme| {
-        if (std.mem.eql(u8, theme.name, name)) {
-            return theme;
+/// Looks up a builtin theme by exact name. Returns null instead of falling
+/// back to a default, so callers can distinguish "not found" from "found".
+pub fn findBuiltin(name: []const u8) ?Theme {
+    for (builtin_themes) |t| {
+        if (std.mem.eql(u8, t.name, name)) {
+            return t;
         }
     }
-    return OneDarker;
+    return null;
 }
+
+/// Wraps a resolved theme so callers don't need to know whether it came from
+/// a builtin (no allocation, `deinit` is a no-op) or was parsed from a user
+/// theme JSON file (heap-owned via `std.json.Parsed`, must be freed exactly
+/// once). `value()` is only valid while the handle is alive.
+pub const ThemeHandle = union(enum) {
+    static: Theme,
+    owned: std.json.Parsed(Theme),
+
+    pub fn value(self: *const ThemeHandle) Theme {
+        return switch (self.*) {
+            .static => |t| t,
+            .owned => |p| p.value,
+        };
+    }
+
+    pub fn deinit(self: *ThemeHandle) void {
+        switch (self.*) {
+            .static => {},
+            .owned => |*p| p.deinit(),
+        }
+    }
+};
 

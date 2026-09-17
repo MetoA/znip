@@ -1,8 +1,8 @@
 const std = @import("std");
 const znip = @import("znip");
 const cli = @import("core/cli.zig");
+const theme_cli = @import("core/theme_cli.zig");
 const config = znip.config;
-const theme = znip.theme_module;
 const util_files = @import("util/files.zig");
 const util_indent = @import("util/indent.zig");
 const clipboard = @import("clipboard/clipboard.zig");
@@ -48,6 +48,13 @@ pub fn main() !void {
         output.err("Couldn't set up '~/.znip': {s}", .{@errorName(err)});
         return;
     };
+
+    const raw_argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, raw_argv);
+    if (raw_argv.len >= 2 and std.mem.eql(u8, raw_argv[1], "theme")) {
+        try theme_cli.run(allocator, raw_argv[2..]);
+        return;
+    }
 
     var cli_config = cli.parse(allocator) catch |err| switch (err) {
         error.InvalidStartEndLines => {
@@ -167,7 +174,18 @@ pub fn main() !void {
     if (cli_config.font_size) |font_size| active_preset.font_size = font_size;
     if (cli_config.transparent) active_preset.transparent_background = true;
 
-    const active_theme = theme.getThemeByName(active_preset.theme);
+    var theme_handle = config.resolveTheme(allocator, active_preset.theme) catch |err| switch (err) {
+        error.ThemeNotFound => {
+            output.err("Theme '{s}' not found.", .{active_preset.theme});
+            return;
+        },
+        else => {
+            output.err("Couldn't load theme '{s}': {s}", .{ active_preset.theme, @errorName(err) });
+            return;
+        },
+    };
+    defer theme_handle.deinit();
+    const active_theme = theme_handle.value();
 
     var code: ?[:0]u8 = null;
     var line_offset: u32 = 1;
