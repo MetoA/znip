@@ -98,3 +98,59 @@ test "trimCommonIndent: single line input" {
     defer allocator.free(result);
     try std.testing.expectEqualStrings("const x = 1;", result);
 }
+
+test "trimCommonIndent: tab indentation is removed" {
+    const allocator = std.testing.allocator;
+    const input: [:0]const u8 = "\tif (x) {\n\t\ty();\n\t}";
+    const result = try trimCommonIndent(allocator, input);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("if (x) {\n\ty();\n}", result);
+}
+
+test "trimCommonIndent: only the shared prefix is removed" {
+    const allocator = std.testing.allocator;
+    const input: [:0]const u8 = "      a\n    b\n        c";
+    const result = try trimCommonIndent(allocator, input);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("  a\nb\n    c", result);
+}
+
+test "trimCommonIndent: whitespace-only lines are emptied" {
+    const allocator = std.testing.allocator;
+    const input: [:0]const u8 = "  a\n \n  b";
+    const result = try trimCommonIndent(allocator, input);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("a\n\nb", result);
+}
+
+test "trimCommonIndent: empty input stays empty" {
+    const allocator = std.testing.allocator;
+    const input: [:0]const u8 = "";
+    const result = try trimCommonIndent(allocator, input);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
+test "trimCommonIndent: all-blank input is returned unchanged" {
+    const allocator = std.testing.allocator;
+    const input: [:0]const u8 = "   \n\t\n";
+    const result = try trimCommonIndent(allocator, input);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings(input, result);
+}
+
+test "trimCommonIndent: trailing newline is preserved" {
+    const allocator = std.testing.allocator;
+    const input: [:0]const u8 = "  a\n  b\n";
+    const result = try trimCommonIndent(allocator, input);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("a\nb\n", result);
+}
+
+test "trimCommonIndent: result is NUL-terminated" {
+    const allocator = std.testing.allocator;
+    const input: [:0]const u8 = "  x";
+    const result = try trimCommonIndent(allocator, input);
+    defer allocator.free(result);
+    try std.testing.expectEqual(@as(u8, 0), result[result.len]);
+}

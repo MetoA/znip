@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zig");
 
 // Placeholder znip-controlled release feed - real hosting is a Phase 6
 // concern (a separate build/release pipeline for grammar assets); this is
@@ -62,7 +63,7 @@ pub fn fetchGrammar(allocator: std.mem.Allocator, client: *std.http.Client, entr
     defer allocator.free(highlights_bytes);
     try verifySha256(highlights_bytes, entry.sha256_highlights);
 
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try config.homeDir(allocator);
     defer allocator.free(home);
 
     const dir_path = try std.fs.path.join(allocator, &.{ home, ".znip", "grammars", entry.name });
@@ -179,4 +180,181 @@ test "verifySha256 accepts a matching digest and rejects a mismatched one" {
 
     try verifySha256(bytes, &correct_hex);
     try std.testing.expectError(error.AssetIntegrityMismatch, verifySha256(bytes, "0" ** 64));
+}
+
+const cobol_manifest_json =
+    \\{
+    \\  "manifest_version": 2,
+    \\  "languages": [
+    \\    {
+    \\      "name": "cobol",
+    \\      "version": "1.2.3",
+    \\      "wasm_url": "https://example.com/cobol.wasm",
+    \\      "highlights_url": "https://example.com/cobol.scm",
+    \\      "extensions": [".cob", ".cbl"],
+    \\      "sha256_wasm": "aa",
+    \\      "sha256_highlights": "bb"
+    \\    },
+    \\    {
+    \\      "name": "fortran",
+    \\      "version": "0.1.0",
+    \\      "wasm_url": "https://example.com/f.wasm",
+    \\      "highlights_url": "https://example.com/f.scm",
+    \\      "extensions": ["f90"],
+    \\      "sha256_wasm": "cc",
+    \\      "sha256_highlights": "dd"
+    \\    }
+    \\  ]
+    \\}
+;
+
+fn sha256Hex(bytes: []const u8) [64]u8 {
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+test "GrammarManifest parses a manifest document" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(GrammarManifest, allocator, cobol_manifest_json, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(u32, 2), parsed.value.manifest_version);
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.languages.len);
+    const cobol = parsed.value.languages[0];
+    try std.testing.expectEqualStrings("cobol", cobol.name);
+    try std.testing.expectEqualStrings("1.2.3", cobol.version);
+    try std.testing.expectEqualStrings("https://example.com/cobol.wasm", cobol.wasm_url);
+    try std.testing.expectEqual(@as(usize, 2), cobol.extensions.len);
+    try std.testing.expectEqualStrings(".cbl", cobol.extensions[1]);
+}
+
+test "GrammarManifest rejects documents missing required fields" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.MissingField, std.json.parseFromSlice(
+        GrammarManifest,
+        allocator,
+        \\{"manifest_version":1}
+        ,
+        .{ .allocate = .alloc_always },
+    ));
+    try std.testing.expectError(error.MissingField, std.json.parseFromSlice(
+        GrammarManifest,
+        allocator,
+        \\{"manifest_version":1,"languages":[{"name":"x"}]}
+        ,
+        .{ .allocate = .alloc_always },
+    ));
+}
+
+test "findEntry on a parsed manifest matches names and extensions with or without a dot" {
+    const allocator = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(GrammarManifest, allocator, cobol_manifest_json, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("cobol", findEntry(parsed.value, "cob").?.name);
+    try std.testing.expectEqualStrings("cobol", findEntry(parsed.value, "CBL").?.name);
+    // The manifest lists "f90" without a leading dot.
+    try std.testing.expectEqualStrings("fortran", findEntry(parsed.value, "f90").?.name);
+    try std.testing.expectEqualStrings("fortran", findEntry(parsed.value, "Fortran").?.name);
+    try std.testing.expect(findEntry(parsed.value, "rust") == null);
+    try std.testing.expect(findEntry(parsed.value, "") == null);
+}
+
+test "findEntry on an empty manifest finds nothing" {
+    const manifest = GrammarManifest{ .manifest_version = 1, .languages = &.{} };
+    try std.testing.expect(findEntry(manifest, "cobol") == null);
+}
+
+test "findEntry returns the first matching entry in manifest order" {
+    const manifest = GrammarManifest{
+        .manifest_version = 1,
+        .languages = &.{
+            .{ .name = "alpha", .version = "1", .wasm_url = "", .highlights_url = "", .extensions = &.{".shared"}, .sha256_wasm = "", .sha256_highlights = "" },
+            .{ .name = "beta", .version = "1", .wasm_url = "", .highlights_url = "", .extensions = &.{".shared"}, .sha256_wasm = "", .sha256_highlights = "" },
+        },
+    };
+    try std.testing.expectEqualStrings("alpha", findEntry(manifest, "shared").?.name);
+    try std.testing.expectEqualStrings("beta", findEntry(manifest, "beta").?.name);
+}
+
+test "extensionMatches ignores a leading dot and case" {
+    try std.testing.expect(extensionMatches(&.{ ".cob", "cbl" }, "cob"));
+    try std.testing.expect(extensionMatches(&.{ ".cob", "cbl" }, "CBL"));
+    try std.testing.expect(!extensionMatches(&.{ ".cob" }, ".cob"));
+    try std.testing.expect(!extensionMatches(&.{}, "cob"));
+    try std.testing.expect(!extensionMatches(&.{".cobol"}, "cob"));
+}
+
+test "verifySha256 accepts uppercase hex digests" {
+    const bytes = "hello world";
+    const lower = sha256Hex(bytes);
+    var upper: [64]u8 = undefined;
+    for (lower, 0..) |ch, i| upper[i] = std.ascii.toUpper(ch);
+
+    try verifySha256(bytes, &upper);
+}
+
+test "verifySha256 matches the well-known digest of empty input" {
+    try verifySha256("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+}
+
+test "verifySha256 rejects wrong, truncated and empty digests" {
+    const bytes = "hello world";
+    const good = sha256Hex(bytes);
+    try std.testing.expectError(error.AssetIntegrityMismatch, verifySha256(bytes, good[0..63]));
+    try std.testing.expectError(error.AssetIntegrityMismatch, verifySha256(bytes, ""));
+    try std.testing.expectError(error.AssetIntegrityMismatch, verifySha256("hello worlD", &good));
+}
+
+test "writeFileAtomic creates a file and leaves no temporary behind" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    try writeFileAtomic(allocator, dir, "grammar.wasm", "\x00asm bytes");
+
+    const content = try tmp.dir.readFileAlloc(allocator, "grammar.wasm", 1024);
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("\x00asm bytes", content);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("grammar.wasm.tmp", .{}));
+}
+
+test "writeFileAtomic replaces an existing file" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    try writeFileAtomic(allocator, dir, "meta.json", "old contents that are longer");
+    try writeFileAtomic(allocator, dir, "meta.json", "new");
+
+    const content = try tmp.dir.readFileAlloc(allocator, "meta.json", 1024);
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("new", content);
+}
+
+test "writeFileAtomic fails for a missing directory and leaves nothing behind" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+    const missing = try std.fs.path.join(allocator, &.{ dir, "missing" });
+    defer allocator.free(missing);
+
+    try std.testing.expectError(error.FileNotFound, writeFileAtomic(allocator, missing, "x", "data"));
+}
+
+test "meta.json written by fetchGrammar is readable by the language registry" {
+    // fetchGrammar stringifies `.{ .extensions = entry.extensions }`; this pins
+    // the shape the registry's alias lookup relies on.
+    const allocator = std.testing.allocator;
+    const extensions: []const []const u8 = &.{ ".cob", ".cbl" };
+    const meta = try std.json.Stringify.valueAlloc(allocator, .{ .extensions = extensions }, .{});
+    defer allocator.free(meta);
+    try std.testing.expectEqualStrings("{\"extensions\":[\".cob\",\".cbl\"]}", meta);
 }

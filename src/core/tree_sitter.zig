@@ -169,7 +169,7 @@ pub const LanguageRegistry = struct {
 
         if (self.loaded.getPtr(name)) |existing| return existing;
 
-        const home = std.process.getEnvVarOwned(self.allocator, "HOME") catch return null;
+        const home = @import("config.zig").homeDir(self.allocator) catch return null;
         defer self.allocator.free(home);
 
         const grammars_dir = try std.fs.path.join(self.allocator, &.{ home, ".znip", "grammars" });
@@ -951,4 +951,1081 @@ fn freeMatches(allocator: std.mem.Allocator, matches: std.ArrayList(Match)) void
         allocator.free(match.capture_name);
     }
     m.deinit(allocator);
+}
+
+const NL = NativeLanguageId;
+
+test "candidateNameFromPath returns the extension without its dot" {
+    try std.testing.expectEqualStrings("cob", candidateNameFromPath("prog.cob").?);
+    try std.testing.expectEqualStrings("rs", candidateNameFromPath("/a/b/main.rs").?);
+    try std.testing.expectEqualStrings("gz", candidateNameFromPath("archive.tar.gz").?);
+    try std.testing.expectEqualStrings("RS", candidateNameFromPath("MAIN.RS").?);
+}
+
+test "candidateNameFromPath returns null without a usable extension" {
+    try std.testing.expect(candidateNameFromPath("Makefile") == null);
+    try std.testing.expect(candidateNameFromPath("trailing.") == null);
+    try std.testing.expect(candidateNameFromPath(".bashrc") == null);
+    try std.testing.expect(candidateNameFromPath("dir.d/file") == null);
+    try std.testing.expect(candidateNameFromPath("") == null);
+}
+
+test "nativeLanguageFromHint maps names and aliases" {
+    const cases = [_]struct { []const u8, NL }{
+        .{ "zig", .zig },
+        .{ "rust", .rust },
+        .{ "rs", .rust },
+        .{ "python", .python },
+        .{ "py", .python },
+        .{ "javascript", .javascript },
+        .{ "js", .javascript },
+        .{ "jsx", .javascript },
+        .{ "typescript", .typescript },
+        .{ "ts", .typescript },
+        .{ "tsx", .typescript },
+        .{ "c", .c },
+        .{ "cpp", .cpp },
+        .{ "c++", .cpp },
+        .{ "cc", .cpp },
+        .{ "cxx", .cpp },
+        .{ "go", .go },
+        .{ "golang", .go },
+        .{ "html", .html },
+        .{ "css", .css },
+        .{ "java", .java },
+        .{ "ruby", .ruby },
+        .{ "rb", .ruby },
+        .{ "json", .json },
+        .{ "php", .php },
+        .{ "markdown", .markdown },
+        .{ "md", .markdown },
+        .{ "sql", .sql },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(@as(?NL, case[1]), nativeLanguageFromHint(case[0]));
+    }
+}
+
+test "nativeLanguageFromHint ignores case" {
+    try std.testing.expectEqual(@as(?NL, .rust), nativeLanguageFromHint("RUST"));
+    try std.testing.expectEqual(@as(?NL, .cpp), nativeLanguageFromHint("C++"));
+    try std.testing.expectEqual(@as(?NL, .typescript), nativeLanguageFromHint("TsX"));
+}
+
+test "nativeLanguageFromHint returns null for unknown or malformed names" {
+    try std.testing.expect(nativeLanguageFromHint("cobol") == null);
+    try std.testing.expect(nativeLanguageFromHint("") == null);
+    try std.testing.expect(nativeLanguageFromHint(" rust") == null);
+    try std.testing.expect(nativeLanguageFromHint("rust ") == null);
+    try std.testing.expect(nativeLanguageFromHint(".rs") == null);
+}
+
+test "every native language is reachable through a hint" {
+    for (std.meta.tags(NL)) |lang| {
+        try std.testing.expectEqual(@as(?NL, lang), nativeLanguageFromHint(Parser.nativeLanguageName(lang)));
+    }
+}
+
+test "native_languages lists each language exactly once" {
+    try std.testing.expectEqual(std.meta.tags(NL).len, native_languages.len);
+    for (native_languages, 0..) |a, i| {
+        for (native_languages[i + 1 ..]) |b| try std.testing.expect(a != b);
+    }
+}
+
+test "detectLanguageFromPath maps every supported extension" {
+    const cases = [_]struct { []const u8, NL }{
+        .{ "a.zig", .zig },
+        .{ "a.rs", .rust },
+        .{ "a.py", .python },
+        .{ "a.js", .javascript },
+        .{ "a.mjs", .javascript },
+        .{ "a.cjs", .javascript },
+        .{ "a.ts", .typescript },
+        .{ "a.tsx", .typescript },
+        .{ "a.c", .c },
+        .{ "a.cpp", .cpp },
+        .{ "a.cc", .cpp },
+        .{ "a.cxx", .cpp },
+        .{ "a.hpp", .cpp },
+        .{ "a.hh", .cpp },
+        .{ "a.hxx", .cpp },
+        .{ "a.go", .go },
+        .{ "a.html", .html },
+        .{ "a.htm", .html },
+        .{ "a.css", .css },
+        .{ "a.java", .java },
+        .{ "a.rb", .ruby },
+        .{ "a.json", .json },
+        .{ "a.php", .php },
+        .{ "a.md", .markdown },
+        .{ "a.markdown", .markdown },
+        .{ "a.sql", .sql },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(@as(?NL, case[1]), Parser.detectLanguageFromPath(case[0]));
+    }
+}
+
+test "detectLanguageFromPath ignores case and uses only the last extension" {
+    try std.testing.expectEqual(@as(?NL, .rust), Parser.detectLanguageFromPath("MAIN.RS"));
+    try std.testing.expectEqual(@as(?NL, .json), Parser.detectLanguageFromPath("/x/y/data.JSON"));
+    try std.testing.expectEqual(@as(?NL, .javascript), Parser.detectLanguageFromPath("bundle.min.js"));
+    try std.testing.expect(Parser.detectLanguageFromPath("main.rs.bak") == null);
+}
+
+test "detectLanguageFromPath returns null for unknown or missing extensions" {
+    try std.testing.expect(Parser.detectLanguageFromPath("Makefile") == null);
+    try std.testing.expect(Parser.detectLanguageFromPath("notes.txt") == null);
+    try std.testing.expect(Parser.detectLanguageFromPath("prog.cob") == null);
+    try std.testing.expect(Parser.detectLanguageFromPath("dir.zig/file") == null);
+    try std.testing.expect(Parser.detectLanguageFromPath(".zig") == null);
+    try std.testing.expect(Parser.detectLanguageFromPath("") == null);
+}
+
+test "extractFenceTag reads the tag from a leading code fence" {
+    try std.testing.expectEqualStrings("rust", Parser.extractFenceTag("```rust\nfn main() {}").?);
+    try std.testing.expectEqualStrings("rust", Parser.extractFenceTag("```rust").?);
+    try std.testing.expectEqualStrings("py", Parser.extractFenceTag("  ```py  \nx = 1").?);
+    try std.testing.expectEqualStrings("js", Parser.extractFenceTag("``` js \r\nlet x").?);
+}
+
+test "extractFenceTag returns null without a fence or tag" {
+    try std.testing.expect(Parser.extractFenceTag("```\ncode") == null);
+    try std.testing.expect(Parser.extractFenceTag("```") == null);
+    try std.testing.expect(Parser.extractFenceTag("fn main() {}") == null);
+    try std.testing.expect(Parser.extractFenceTag("") == null);
+    try std.testing.expect(Parser.extractFenceTag("code\n```rust\n") == null);
+    try std.testing.expect(Parser.extractFenceTag("``rust\n") == null);
+}
+
+test "detectLanguageFromFence resolves native tags only" {
+    try std.testing.expectEqual(@as(?NL, .python), Parser.detectLanguageFromFence("```python\nx = 1"));
+    try std.testing.expectEqual(@as(?NL, .typescript), Parser.detectLanguageFromFence("```ts\nlet x"));
+    try std.testing.expectEqual(@as(?NL, .cpp), Parser.detectLanguageFromFence("```c++\nint x;"));
+    try std.testing.expect(Parser.detectLanguageFromFence("```cobol\nMOVE") == null);
+    try std.testing.expect(Parser.detectLanguageFromFence("```\nplain") == null);
+    try std.testing.expect(Parser.detectLanguageFromFence("no fence") == null);
+}
+
+test "detectLanguageFromShebang recognizes python, ruby and javascript runtimes" {
+    try std.testing.expectEqual(@as(?NL, .python), Parser.detectLanguageFromShebang("#!/usr/bin/env python3\nprint(1)"));
+    try std.testing.expectEqual(@as(?NL, .python), Parser.detectLanguageFromShebang("#!/usr/bin/python"));
+    try std.testing.expectEqual(@as(?NL, .ruby), Parser.detectLanguageFromShebang("#!/usr/bin/env ruby\nputs 1"));
+    try std.testing.expectEqual(@as(?NL, .javascript), Parser.detectLanguageFromShebang("#!/usr/bin/env node\n"));
+    try std.testing.expectEqual(@as(?NL, .javascript), Parser.detectLanguageFromShebang("#!/usr/bin/env -S deno run\n"));
+    try std.testing.expectEqual(@as(?NL, .javascript), Parser.detectLanguageFromShebang("#!/usr/bin/env bun\n"));
+}
+
+test "detectLanguageFromShebang ignores case and surrounding whitespace" {
+    try std.testing.expectEqual(@as(?NL, .python), Parser.detectLanguageFromShebang("#!/usr/bin/env PYTHON\n"));
+    try std.testing.expectEqual(@as(?NL, .ruby), Parser.detectLanguageFromShebang("  #!/usr/bin/ruby \r\n"));
+}
+
+test "detectLanguageFromShebang returns null when there is nothing to detect" {
+    try std.testing.expect(Parser.detectLanguageFromShebang("#!/bin/bash\necho hi") == null);
+    try std.testing.expect(Parser.detectLanguageFromShebang("# python script") == null);
+    try std.testing.expect(Parser.detectLanguageFromShebang("print(1)\n#!/usr/bin/env python") == null);
+    try std.testing.expect(Parser.detectLanguageFromShebang("") == null);
+    try std.testing.expect(Parser.detectLanguageFromShebang("#!") == null);
+}
+
+test "containsIgnoreCase finds substrings regardless of case" {
+    try std.testing.expect(Parser.containsIgnoreCase("Hello World", "WORLD"));
+    try std.testing.expect(Parser.containsIgnoreCase("Hello", "hello"));
+    try std.testing.expect(Parser.containsIgnoreCase("abc", "c"));
+    try std.testing.expect(Parser.containsIgnoreCase("abc", ""));
+    try std.testing.expect(Parser.containsIgnoreCase("", ""));
+}
+
+test "containsIgnoreCase rejects absent or oversized needles" {
+    try std.testing.expect(!Parser.containsIgnoreCase("abc", "d"));
+    try std.testing.expect(!Parser.containsIgnoreCase("ab", "abc"));
+    try std.testing.expect(!Parser.containsIgnoreCase("", "a"));
+}
+
+test "computeScore rewards named nodes, depth and named ratio" {
+    // 2 * 5 named + 1 * 3 depth + 80 * (5 / 10) ratio
+    const stats = TreeStats{ .total_nodes = 10, .named_nodes = 5, .max_depth = 3 };
+    try std.testing.expectApproxEqAbs(@as(f64, 53.0), Parser.computeScore(stats), 1e-9);
+}
+
+test "computeScore of an empty tree is zero" {
+    try std.testing.expectEqual(@as(f64, 0.0), Parser.computeScore(.{}));
+}
+
+test "computeScore ignores errors and missing nodes" {
+    const clean = TreeStats{ .total_nodes = 10, .named_nodes = 5, .max_depth = 3 };
+    const dirty = TreeStats{ .total_nodes = 10, .named_nodes = 5, .max_depth = 3, .error_nodes = 4, .missing_nodes = 2, .has_error = true };
+    try std.testing.expectEqual(Parser.computeScore(clean), Parser.computeScore(dirty));
+}
+
+test "isBetterCandidate prefers a clean parse over a higher-scoring defective one" {
+    const clean = TreeStats{ .has_error = false };
+    const dirty = TreeStats{ .has_error = true, .error_nodes = 1 };
+    try std.testing.expect(Parser.isBetterCandidate(clean, 1.0, dirty, 1000.0));
+    try std.testing.expect(!Parser.isBetterCandidate(dirty, 1000.0, clean, 1.0));
+}
+
+test "isBetterCandidate prefers fewer defects when both have errors" {
+    const few = TreeStats{ .has_error = true, .error_nodes = 1 };
+    const many = TreeStats{ .has_error = true, .error_nodes = 1, .missing_nodes = 2 };
+    try std.testing.expect(Parser.isBetterCandidate(few, 1.0, many, 1000.0));
+    try std.testing.expect(!Parser.isBetterCandidate(many, 1000.0, few, 1.0));
+}
+
+test "isBetterCandidate counts error and missing nodes alike" {
+    const errors = TreeStats{ .has_error = true, .error_nodes = 2 };
+    const missing = TreeStats{ .has_error = true, .missing_nodes = 2 };
+    // Equal defect counts fall through to the score.
+    try std.testing.expect(Parser.isBetterCandidate(errors, 10.0, missing, 5.0));
+    try std.testing.expect(!Parser.isBetterCandidate(errors, 5.0, missing, 10.0));
+}
+
+test "isBetterCandidate compares scores between equally clean parses" {
+    const a = TreeStats{};
+    try std.testing.expect(Parser.isBetterCandidate(a, 10.0, a, 9.0));
+    try std.testing.expect(!Parser.isBetterCandidate(a, 9.0, a, 10.0));
+}
+
+test "isBetterCandidate does not replace on an exact tie" {
+    const a = TreeStats{};
+    try std.testing.expect(!Parser.isBetterCandidate(a, 7.0, a, 7.0));
+}
+
+test "categorizeCapture maps variable captures, most specific first" {
+    const TC = TokenCategory;
+    try std.testing.expectEqual(TC.variable_parameter, TC.categorizeCapture("variable.parameter"));
+    try std.testing.expectEqual(TC.variable_parameter, TC.categorizeCapture("variable.parameter.builtin"));
+    try std.testing.expectEqual(TC.variable_member, TC.categorizeCapture("variable.member"));
+    try std.testing.expectEqual(TC.variable_builtin, TC.categorizeCapture("variable.builtin"));
+    try std.testing.expectEqual(TC.variable, TC.categorizeCapture("variable"));
+    try std.testing.expectEqual(TC.variable, TC.categorizeCapture("variable.other"));
+}
+
+test "categorizeCapture maps type, tag and string captures" {
+    const TC = TokenCategory;
+    try std.testing.expectEqual(TC.type_builtin, TC.categorizeCapture("type.builtin"));
+    try std.testing.expectEqual(TC.type, TC.categorizeCapture("type"));
+    try std.testing.expectEqual(TC.type, TC.categorizeCapture("type.definition"));
+    try std.testing.expectEqual(TC.tag_attribute, TC.categorizeCapture("tag.attribute"));
+    try std.testing.expectEqual(TC.tag, TC.categorizeCapture("tag"));
+    try std.testing.expectEqual(TC.tag, TC.categorizeCapture("tag.delimiter"));
+    try std.testing.expectEqual(TC.string_special, TC.categorizeCapture("string.special"));
+    try std.testing.expectEqual(TC.string_special, TC.categorizeCapture("string.special.url"));
+    try std.testing.expectEqual(TC.string_escape, TC.categorizeCapture("string.escape"));
+    try std.testing.expectEqual(TC.string, TC.categorizeCapture("string"));
+    try std.testing.expectEqual(TC.string, TC.categorizeCapture("string.documentation"));
+}
+
+test "categorizeCapture maps punctuation, property, operator and number captures" {
+    const TC = TokenCategory;
+    try std.testing.expectEqual(TC.punctuation_delimiter, TC.categorizeCapture("punctuation.delimiter"));
+    try std.testing.expectEqual(TC.punctuation_bracket, TC.categorizeCapture("punctuation.bracket"));
+    try std.testing.expectEqual(TC.punctuation, TC.categorizeCapture("punctuation"));
+    try std.testing.expectEqual(TC.punctuation, TC.categorizeCapture("punctuation.special"));
+    try std.testing.expectEqual(TC.property, TC.categorizeCapture("property"));
+    try std.testing.expectEqual(TC.operator, TC.categorizeCapture("operator"));
+    try std.testing.expectEqual(TC.number, TC.categorizeCapture("number"));
+    try std.testing.expectEqual(TC.number, TC.categorizeCapture("number.float"));
+}
+
+test "categorizeCapture maps keyword captures, most specific first" {
+    const TC = TokenCategory;
+    try std.testing.expectEqual(TC.keyword_return, TC.categorizeCapture("keyword.return"));
+    try std.testing.expectEqual(TC.keyword_operator, TC.categorizeCapture("keyword.operator"));
+    try std.testing.expectEqual(TC.keyword_modifier, TC.categorizeCapture("keyword.modifier"));
+    try std.testing.expectEqual(TC.keyword_function, TC.categorizeCapture("keyword.function"));
+    try std.testing.expectEqual(TC.keyword, TC.categorizeCapture("keyword"));
+    try std.testing.expectEqual(TC.keyword, TC.categorizeCapture("keyword.conditional"));
+    try std.testing.expectEqual(TC.keyword, TC.categorizeCapture("keyword.repeat"));
+}
+
+test "categorizeCapture maps function, field, constructor, constant and comment captures" {
+    const TC = TokenCategory;
+    try std.testing.expectEqual(TC.function_method, TC.categorizeCapture("function.method"));
+    try std.testing.expectEqual(TC.function_call, TC.categorizeCapture("function.call"));
+    try std.testing.expectEqual(TC.function_builtin, TC.categorizeCapture("function.builtin"));
+    try std.testing.expectEqual(TC.function, TC.categorizeCapture("function"));
+    try std.testing.expectEqual(TC.function, TC.categorizeCapture("function.macro"));
+    try std.testing.expectEqual(TC.field, TC.categorizeCapture("field"));
+    try std.testing.expectEqual(TC.constructor, TC.categorizeCapture("constructor"));
+    try std.testing.expectEqual(TC.constant, TC.categorizeCapture("constant"));
+    try std.testing.expectEqual(TC.constant, TC.categorizeCapture("constant.builtin"));
+    try std.testing.expectEqual(TC.comment, TC.categorizeCapture("comment"));
+    try std.testing.expectEqual(TC.comment, TC.categorizeCapture("comment.documentation"));
+}
+
+test "categorizeCapture falls back to default_text for unknown or empty names" {
+    const TC = TokenCategory;
+    try std.testing.expectEqual(TC.default_text, TC.categorizeCapture(""));
+    try std.testing.expectEqual(TC.default_text, TC.categorizeCapture("unknown.thing"));
+    try std.testing.expectEqual(TC.default_text, TC.categorizeCapture("spell"));
+    // Matching is by case-sensitive prefix.
+    try std.testing.expectEqual(TC.default_text, TC.categorizeCapture("Variable"));
+    try std.testing.expectEqual(TC.default_text, TC.categorizeCapture(".variable"));
+}
+
+/// Runs `sourceCodeTokens` over hand-built matches. Uses an arena because the
+/// function takes ownership of kept capture names and drops skipped ones.
+fn tokensFor(arena: std.mem.Allocator, source: [:0]const u8, spans: []const Match) !std.ArrayList(Token) {
+    var parser = Parser.init(arena, source, null);
+    var matches = std.ArrayList(Match).empty;
+    try matches.appendSlice(arena, spans);
+    return parser.sourceCodeTokens(matches);
+}
+
+fn expectToken(token: Token, text: []const u8, capture: []const u8, is_newline: bool) !void {
+    try std.testing.expectEqualStrings(text, token.text);
+    try std.testing.expectEqualStrings(capture, token.capture_name);
+    try std.testing.expectEqual(is_newline, token.is_newline);
+}
+
+test "sourceCodeTokens with no matches yields the source as one plain token" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "abc def", &.{});
+    try std.testing.expectEqual(@as(usize, 1), tokens.items.len);
+    try expectToken(tokens.items[0], "abc def", "", false);
+}
+
+test "sourceCodeTokens of an empty source is empty" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "", &.{});
+    try std.testing.expectEqual(@as(usize, 0), tokens.items.len);
+}
+
+test "sourceCodeTokens fills the gaps between matches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "fn main", &.{
+        .{ .start_byte = 0, .end_byte = 2, .capture_name = "keyword" },
+        .{ .start_byte = 3, .end_byte = 7, .capture_name = "function" },
+    });
+    try std.testing.expectEqual(@as(usize, 3), tokens.items.len);
+    try expectToken(tokens.items[0], "fn", "keyword", false);
+    try expectToken(tokens.items[1], " ", "", false);
+    try expectToken(tokens.items[2], "main", "function", false);
+}
+
+test "sourceCodeTokens emits no gap token for adjacent matches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "ab", &.{
+        .{ .start_byte = 0, .end_byte = 1, .capture_name = "a" },
+        .{ .start_byte = 1, .end_byte = 2, .capture_name = "b" },
+    });
+    try std.testing.expectEqual(@as(usize, 2), tokens.items.len);
+    try expectToken(tokens.items[0], "a", "a", false);
+    try expectToken(tokens.items[1], "b", "b", false);
+}
+
+test "sourceCodeTokens keeps leading and trailing text outside any match" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "  x ;", &.{
+        .{ .start_byte = 2, .end_byte = 3, .capture_name = "variable" },
+    });
+    try std.testing.expectEqual(@as(usize, 3), tokens.items.len);
+    try expectToken(tokens.items[0], "  ", "", false);
+    try expectToken(tokens.items[1], "x", "variable", false);
+    try expectToken(tokens.items[2], " ;", "", false);
+}
+
+test "sourceCodeTokens flags a gap of exactly one newline" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "a\nb", &.{
+        .{ .start_byte = 0, .end_byte = 1, .capture_name = "x" },
+        .{ .start_byte = 2, .end_byte = 3, .capture_name = "y" },
+    });
+    try std.testing.expectEqual(@as(usize, 3), tokens.items.len);
+    try expectToken(tokens.items[1], "\n", "", true);
+}
+
+test "sourceCodeTokens does not flag longer or mixed gaps as newlines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "a\n\nb c\r\nd \ne", &.{
+        .{ .start_byte = 0, .end_byte = 1, .capture_name = "t" },
+        .{ .start_byte = 3, .end_byte = 4, .capture_name = "t" },
+        .{ .start_byte = 5, .end_byte = 6, .capture_name = "t" },
+        .{ .start_byte = 8, .end_byte = 9, .capture_name = "t" },
+        .{ .start_byte = 11, .end_byte = 12, .capture_name = "t" },
+    });
+    for (tokens.items) |t| try std.testing.expect(!t.is_newline);
+}
+
+test "sourceCodeTokens flags a trailing lone newline" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "a\n", &.{
+        .{ .start_byte = 0, .end_byte = 1, .capture_name = "x" },
+    });
+    try std.testing.expectEqual(@as(usize, 2), tokens.items.len);
+    try expectToken(tokens.items[1], "\n", "", true);
+}
+
+test "sourceCodeTokens sorts out-of-order matches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "ab cd", &.{
+        .{ .start_byte = 3, .end_byte = 5, .capture_name = "second" },
+        .{ .start_byte = 0, .end_byte = 2, .capture_name = "first" },
+    });
+    try std.testing.expectEqual(@as(usize, 3), tokens.items.len);
+    try expectToken(tokens.items[0], "ab", "first", false);
+    try expectToken(tokens.items[1], " ", "", false);
+    try expectToken(tokens.items[2], "cd", "second", false);
+}
+
+test "sourceCodeTokens keeps the wider match when two start at the same byte" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Listed narrow-first on purpose: sorting must still put the wide one first.
+    const tokens = try tokensFor(arena.allocator(), "hello", &.{
+        .{ .start_byte = 0, .end_byte = 2, .capture_name = "inner" },
+        .{ .start_byte = 0, .end_byte = 5, .capture_name = "outer" },
+    });
+    try std.testing.expectEqual(@as(usize, 1), tokens.items.len);
+    try expectToken(tokens.items[0], "hello", "outer", false);
+}
+
+test "sourceCodeTokens skips matches nested inside an earlier one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "0123456789", &.{
+        .{ .start_byte = 0, .end_byte = 10, .capture_name = "outer" },
+        .{ .start_byte = 3, .end_byte = 5, .capture_name = "nested" },
+    });
+    try std.testing.expectEqual(@as(usize, 1), tokens.items.len);
+    try expectToken(tokens.items[0], "0123456789", "outer", false);
+}
+
+test "sourceCodeTokens skips a partially overlapping match and keeps the rest as plain text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokensFor(arena.allocator(), "abcdefgh", &.{
+        .{ .start_byte = 0, .end_byte = 4, .capture_name = "A" },
+        .{ .start_byte = 2, .end_byte = 6, .capture_name = "B" },
+    });
+    try std.testing.expectEqual(@as(usize, 2), tokens.items.len);
+    try expectToken(tokens.items[0], "abcd", "A", false);
+    try expectToken(tokens.items[1], "efgh", "", false);
+}
+
+test "sourceCodeTokens hands matched capture names to the tokens without copying" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const name: []const u8 = "keyword";
+    const tokens = try tokensFor(arena.allocator(), "fn", &.{
+        .{ .start_byte = 0, .end_byte = 2, .capture_name = name },
+    });
+    try std.testing.expect(tokens.items[0].capture_name.ptr == name.ptr);
+}
+
+test "sourceCodeTokens copies token text out of the source" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const source: [:0]const u8 = "fn x";
+    const tokens = try tokensFor(arena.allocator(), source, &.{
+        .{ .start_byte = 0, .end_byte = 2, .capture_name = "keyword" },
+    });
+    try std.testing.expect(tokens.items[0].text.ptr != source.ptr);
+}
+
+test "sourceCodeTokens text always reassembles the source when matches don't overlap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source: [:0]const u8 = "const x = 1;\n// hi\n";
+    const tokens = try tokensFor(allocator, source, &.{
+        .{ .start_byte = 0, .end_byte = 5, .capture_name = "keyword" },
+        .{ .start_byte = 6, .end_byte = 7, .capture_name = "variable" },
+        .{ .start_byte = 10, .end_byte = 11, .capture_name = "number" },
+        .{ .start_byte = 13, .end_byte = 18, .capture_name = "comment" },
+    });
+
+    var rebuilt = std.ArrayList(u8).empty;
+    for (tokens.items) |t| try rebuilt.appendSlice(allocator, t.text);
+    try std.testing.expectEqualStrings(source, rebuilt.items);
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests: these run the real, statically linked tree-sitter
+// grammars and highlight queries (no mocks).
+// ---------------------------------------------------------------------------
+
+const LanguageSample = struct {
+    lang: []const u8,
+    source: [:0]const u8,
+    /// Tokens (by exact text) that must be highlighted with the given category.
+    expect: []const struct { []const u8, TokenCategory },
+};
+
+const language_samples = [_]LanguageSample{
+    .{
+        .lang = "zig",
+        .source = "const std = @import(\"std\");\n\npub fn main() void {\n    const x: u32 = 5;\n    return;\n}\n",
+        .expect = &.{
+            .{ "const", .keyword },
+            .{ "pub", .keyword_modifier },
+            .{ "fn", .keyword_function },
+            .{ "main", .function },
+            .{ "void", .type_builtin },
+            .{ "u32", .type_builtin },
+            .{ "5", .number },
+            .{ "return", .keyword_return },
+            .{ "\"std\"", .string },
+        },
+    },
+    .{
+        .lang = "rust",
+        .source = "fn main() {\n    let x: i32 = 5;\n    println!(\"{}\", x);\n}\n",
+        .expect = &.{ .{ "fn", .keyword }, .{ "main", .function }, .{ "let", .keyword }, .{ "i32", .type_builtin }, .{ "\"{}\"", .string } },
+    },
+    .{
+        .lang = "python",
+        .source = "# note\ndef add(a, b):\n    return a + b\n\nprint(add(1, \"two\"))\n",
+        .expect = &.{ .{ "# note", .comment }, .{ "def", .keyword }, .{ "add", .function }, .{ "1", .number }, .{ "\"two\"", .string } },
+    },
+    .{
+        .lang = "javascript",
+        .source = "// note\nfunction add(a, b) {\n  return a + b;\n}\nconsole.log(add(1, 2));\n",
+        .expect = &.{ .{ "// note", .comment }, .{ "function", .keyword }, .{ "log", .function_method }, .{ "2", .number } },
+    },
+    .{
+        .lang = "typescript",
+        .source = "function add(a: number, b: number): number {\n  return a + b;\n}\n",
+        .expect = &.{ .{ "number", .type_builtin }, .{ "a", .variable_parameter } },
+    },
+    .{
+        .lang = "json",
+        .source = "{\"a\": 1, \"b\": [true, false, null], \"c\": \"text\"}",
+        .expect = &.{ .{ "\"a\"", .string_special }, .{ "1", .number }, .{ "true", .constant }, .{ "\"text\"", .string } },
+    },
+    .{
+        .lang = "go",
+        .source = "package main\n\nfunc main() {\n\tx := 5\n}\n",
+        .expect = &.{ .{ "package", .keyword }, .{ "func", .keyword }, .{ "main", .function }, .{ ":=", .operator }, .{ "5", .number } },
+    },
+    .{
+        .lang = "c",
+        .source = "#include <stdio.h>\n\nint main(void) {\n    return 0;\n}\n",
+        .expect = &.{ .{ "int", .type }, .{ "main", .function }, .{ "return", .keyword }, .{ "0", .number } },
+    },
+    .{
+        .lang = "cpp",
+        .source = "#include <iostream>\nint main() {\n    std::cout << 1;\n}\n",
+        .expect = &.{},
+    },
+    .{
+        .lang = "java",
+        .source = "public class A {\n    public static void main(String[] args) {\n    }\n}\n",
+        .expect = &.{ .{ "class", .keyword }, .{ "A", .type }, .{ "void", .type_builtin }, .{ "main", .function_method } },
+    },
+    .{
+        .lang = "ruby",
+        .source = "def add(a, b)\n  a + b\nend\nputs add(1, 2)\n",
+        .expect = &.{ .{ "def", .keyword }, .{ "end", .keyword }, .{ "1", .number } },
+    },
+    .{
+        .lang = "css",
+        .source = "body {\n  color: red;\n}\n",
+        .expect = &.{ .{ "body", .tag }, .{ "{", .punctuation_bracket } },
+    },
+    .{
+        .lang = "html",
+        .source = "<div class=\"a\">hi</div>\n",
+        .expect = &.{ .{ "div", .tag }, .{ "<", .punctuation_bracket } },
+    },
+    .{
+        .lang = "sql",
+        .source = "SELECT id, name FROM users WHERE id = 1;\n",
+        .expect = &.{ .{ "SELECT", .keyword }, .{ "FROM", .keyword }, .{ "WHERE", .keyword } },
+    },
+    .{
+        .lang = "php",
+        .source = "<?php\nfunction add($a, $b) {\n    return $a + $b;\n}\n",
+        .expect = &.{ .{ "function", .keyword }, .{ "add", .function }, .{ "return", .keyword } },
+    },
+    .{
+        .lang = "markdown",
+        .source = "# Title\n\nSome *text* here.\n",
+        .expect = &.{ .{ "#", .punctuation } },
+    },
+};
+
+fn findCategory(tokens: []const Token, text: []const u8) ?TokenCategory {
+    for (tokens) |t| {
+        if (t.capture_name.len == 0) continue;
+        if (std.mem.eql(u8, t.text, text)) return TokenCategory.categorizeCapture(t.capture_name);
+    }
+    return null;
+}
+
+fn expectReassembles(allocator: std.mem.Allocator, source: []const u8, tokens: []const Token) !void {
+    var rebuilt = std.ArrayList(u8).empty;
+    defer rebuilt.deinit(allocator);
+    for (tokens) |t| try rebuilt.appendSlice(allocator, t.text);
+    try std.testing.expectEqualStrings(source, rebuilt.items);
+}
+
+test "every native grammar loads, parses and highlights its sample" {
+    for (language_samples) |sample| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var parser = Parser.init(allocator, sample.source, null);
+        parser.setRequestedLanguage(sample.lang);
+        const matches = try parser.sourceCodeMatches();
+        try std.testing.expect(matches.items.len > 0);
+
+        const tokens = try parser.sourceCodeTokens(matches);
+        try expectReassembles(allocator, sample.source, tokens.items);
+
+        for (sample.expect) |want| {
+            const got = findCategory(tokens.items, want[0]) orelse {
+                std.debug.print("{s}: no highlighted token '{s}'\n", .{ sample.lang, want[0] });
+                return error.TestUnexpectedResult;
+            };
+            if (got != want[1]) {
+                std.debug.print("{s}: '{s}' is {s}, expected {s}\n", .{ sample.lang, want[0], @tagName(got), @tagName(want[1]) });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
+
+test "sourceCodeMatches never reports the spell capture" {
+    for (language_samples) |sample| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+
+        var parser = Parser.init(arena.allocator(), sample.source, null);
+        parser.setRequestedLanguage(sample.lang);
+        const matches = try parser.sourceCodeMatches();
+        for (matches.items) |m| {
+            try std.testing.expect(!std.mem.eql(u8, m.capture_name, "spell"));
+        }
+    }
+}
+
+test "sourceCodeMatches reports valid byte spans inside the source" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const source: [:0]const u8 = "const x = 1;\n";
+    var parser = Parser.init(arena.allocator(), source, "a.zig");
+    const matches = try parser.sourceCodeMatches();
+    try std.testing.expect(matches.items.len > 0);
+    for (matches.items) |m| {
+        try std.testing.expect(m.start_byte < m.end_byte);
+        try std.testing.expect(m.end_byte <= source.len);
+        try std.testing.expect(m.capture_name.len > 0);
+    }
+}
+
+test "tokens use byte offsets, so multi-byte UTF-8 survives intact" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source: [:0]const u8 = "s = \"héllo ✓\"\nn = 1\n";
+    var parser = Parser.init(allocator, source, "a.py");
+    const matches = try parser.sourceCodeMatches();
+    const tokens = try parser.sourceCodeTokens(matches);
+
+    try expectReassembles(allocator, source, tokens.items);
+    try std.testing.expectEqual(@as(?TokenCategory, .string), findCategory(tokens.items, "\"héllo ✓\""));
+    try std.testing.expectEqual(@as(?TokenCategory, .number), findCategory(tokens.items, "1"));
+}
+
+test "tokens preserve CRLF line endings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source: [:0]const u8 = "x = 1\r\ny = 2\r\n";
+    var parser = Parser.init(allocator, source, "a.py");
+    const matches = try parser.sourceCodeMatches();
+    const tokens = try parser.sourceCodeTokens(matches);
+    try expectReassembles(allocator, source, tokens.items);
+}
+
+test "malformed source still tokenizes without crashing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source: [:0]const u8 = "fn ((( }}} \x01 \"unterminated\n";
+    var parser = Parser.init(allocator, source, "a.rs");
+    const matches = try parser.sourceCodeMatches();
+    const tokens = try parser.sourceCodeTokens(matches);
+    try expectReassembles(allocator, source, tokens.items);
+}
+
+test "a source with no highlightable content yields a single plain token" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source: [:0]const u8 = "   \n  \n";
+    var parser = Parser.init(allocator, source, null);
+    const matches = try parser.sourceCodeMatches();
+    const tokens = try parser.sourceCodeTokens(matches);
+    try expectReassembles(allocator, source, tokens.items);
+    for (tokens.items) |t| try std.testing.expectEqualStrings("", t.capture_name);
+}
+
+fn detect(source: [:0]const u8, hint: ?[]const u8, requested: ?[]const u8) !LanguageRef {
+    var parser = Parser.init(std.testing.allocator, source, hint);
+    if (requested) |name| parser.setRequestedLanguage(name);
+    return parser.detectLanguage();
+}
+
+fn expectNative(expected: NL, actual: LanguageRef) !void {
+    switch (actual) {
+        .native => |n| try std.testing.expectEqual(expected, n),
+        .dynamic => return error.TestUnexpectedResult,
+    }
+}
+
+test "detectLanguage honours an explicit language over everything else" {
+    try expectNative(.rust, try detect("def f(): pass", "a.py", "rust"));
+    try expectNative(.rust, try detect("def f(): pass", null, "RS"));
+    try expectNative(.cpp, try detect("", null, "c++"));
+}
+
+test "detectLanguage errors for an explicit language that is not available" {
+    try std.testing.expectError(error.LanguageNotAvailable, detect("x", null, "cobol"));
+    try std.testing.expectError(error.LanguageNotAvailable, detect("x", "a.rs", ""));
+}
+
+test "detectLanguage defaults empty and whitespace-only input to zig" {
+    try expectNative(.zig, try detect("", null, null));
+    try expectNative(.zig, try detect("  \n\t\r\n", null, null));
+    try expectNative(.zig, try detect("   ", "main.py", null));
+}
+
+test "detectLanguage trusts the file extension over the content" {
+    try expectNative(.rust, try detect("def add(a, b):\n    return a + b\n", "x.rs", null));
+    try expectNative(.python, try detect("fn main() {}\n", "x.py", null));
+    try expectNative(.json, try detect("print('hi')", "/some/dir/data.JSON", null));
+}
+
+test "detectLanguage prefers the extension over a fence tag and the fence over a shebang" {
+    try expectNative(.python, try detect("```rust\nfn main() {}\n```", "x.py", null));
+    try expectNative(.go, try detect("```go\npackage main\n```", null, null));
+}
+
+test "detectLanguage uses a code fence tag when there is no extension" {
+    try expectNative(.rust, try detect("```rust\nlet x = 1;\n```", null, null));
+    try expectNative(.typescript, try detect("```ts\nlet x = 1;\n```", "notes.txt", null));
+}
+
+test "detectLanguage uses a shebang when there is no other signal" {
+    try expectNative(.python, try detect("#!/usr/bin/env python3\nx = 1\n", null, null));
+    try expectNative(.ruby, try detect("#!/usr/bin/env ruby\nputs 1\n", null, null));
+    try expectNative(.javascript, try detect("#!/usr/bin/env node\nlet x = 1;\n", null, null));
+}
+
+test "detectLanguage falls back to content scoring for unrecognized hints" {
+    const python: [:0]const u8 = "def add(a, b):\n    return a + b\n\nprint(add(1, \"two\"))\n";
+    try expectNative(.python, try detect(python, null, null));
+    try expectNative(.python, try detect(python, "notes.txt", null));
+
+    try expectNative(.java, try detect("public class A {\n    public static void main(String[] args) {\n    }\n}\n", null, null));
+    try expectNative(.php, try detect("<?php\nfunction add($a, $b) {\n    return $a + $b;\n}\n", null, null));
+}
+
+test "detectLanguage only ever returns a native language without a registry" {
+    for (language_samples) |sample| {
+        const lang = try detect(sample.source, null, null);
+        try std.testing.expect(lang == .native);
+    }
+}
+
+test "detectLanguage only looks at the first 16KB of a large input" {
+    const allocator = std.testing.allocator;
+    var big = std.ArrayList(u8).empty;
+    defer big.deinit(allocator);
+    try big.appendNTimes(allocator, ' ', Parser.max_detection_bytes);
+    try big.appendSlice(allocator, "\ndef f(a):\n    return a\n");
+    const source = try allocator.dupeZ(u8, big.items);
+    defer allocator.free(source);
+
+    // Everything inside the detection window is blank, so it counts as empty
+    // input and defaults to zig; the trailing Python is never considered.
+    try expectNative(.zig, try detect(source, null, null));
+}
+
+// ---------------------------------------------------------------------------
+// LanguageRegistry: on-disk grammar cache lookups (no WASM is ever loaded).
+// ---------------------------------------------------------------------------
+
+fn writeCachedGrammar(tmp: *std.testing.TmpDir, name: []const u8, meta_json: ?[]const u8) !void {
+    try tmp.dir.makePath(name);
+    if (meta_json) |meta| {
+        var dir = try tmp.dir.openDir(name, .{});
+        defer dir.close();
+        try dir.writeFile(.{ .sub_path = "meta.json", .data = meta });
+    }
+}
+
+fn expectCanonical(registry: *LanguageRegistry, dir_path: []const u8, name: []const u8, expected: ?[]const u8) !void {
+    const found = try registry.findCanonicalNameByExtension(dir_path, name);
+    defer if (found) |f| registry.allocator.free(f);
+    if (expected) |want| {
+        try std.testing.expectEqualStrings(want, found orelse return error.TestUnexpectedResult);
+    } else {
+        try std.testing.expect(found == null);
+    }
+}
+
+test "findCanonicalNameByExtension maps an alias extension to its cache directory" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeCachedGrammar(&tmp, "cobol", "{\"extensions\":[\".cob\",\".cbl\"]}");
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    var registry = LanguageRegistry.init(allocator);
+    defer registry.loaded.deinit();
+
+    try expectCanonical(&registry, dir, "cob", "cobol");
+    try expectCanonical(&registry, dir, "cbl", "cobol");
+    try expectCanonical(&registry, dir, "COB", "cobol");
+}
+
+test "findCanonicalNameByExtension accepts extensions with or without a dot" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeCachedGrammar(&tmp, "fortran", "{\"extensions\":[\"f90\"]}");
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    var registry = LanguageRegistry.init(allocator);
+    defer registry.loaded.deinit();
+
+    try expectCanonical(&registry, dir, "f90", "fortran");
+}
+
+test "findCanonicalNameByExtension picks the right directory among several" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeCachedGrammar(&tmp, "cobol", "{\"extensions\":[\".cob\"]}");
+    try writeCachedGrammar(&tmp, "fortran", "{\"extensions\":[\".f90\"]}");
+    try writeCachedGrammar(&tmp, "zeta", "{\"extensions\":[\".zzz\"]}");
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    var registry = LanguageRegistry.init(allocator);
+    defer registry.loaded.deinit();
+
+    try expectCanonical(&registry, dir, "f90", "fortran");
+    try expectCanonical(&registry, dir, "cob", "cobol");
+    try expectCanonical(&registry, dir, "zzz", "zeta");
+}
+
+test "findCanonicalNameByExtension returns null for unknown extensions" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeCachedGrammar(&tmp, "cobol", "{\"extensions\":[\".cob\"]}");
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    var registry = LanguageRegistry.init(allocator);
+    defer registry.loaded.deinit();
+
+    try expectCanonical(&registry, dir, "xyz", null);
+    try expectCanonical(&registry, dir, "", null);
+    try expectCanonical(&registry, dir, "cobo", null);
+}
+
+test "findCanonicalNameByExtension skips the directory named like the lookup" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Looked up directly by the caller first, so it must not match itself here.
+    try writeCachedGrammar(&tmp, "cobol", "{\"extensions\":[\"cobol\"]}");
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    var registry = LanguageRegistry.init(allocator);
+    defer registry.loaded.deinit();
+
+    try expectCanonical(&registry, dir, "cobol", null);
+    try expectCanonical(&registry, dir, "COBOL", null);
+}
+
+test "findCanonicalNameByExtension ignores broken or missing meta files and stray files" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeCachedGrammar(&tmp, "nometa", null);
+    try writeCachedGrammar(&tmp, "garbage", "{ this is not json");
+    try writeCachedGrammar(&tmp, "wrongshape", "[1, 2, 3]");
+    try tmp.dir.writeFile(.{ .sub_path = "cob", .data = "{\"extensions\":[\"cob\"]}" });
+    try writeCachedGrammar(&tmp, "good", "{\"extensions\":[\".cob\"]}");
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    var registry = LanguageRegistry.init(allocator);
+    defer registry.loaded.deinit();
+
+    try expectCanonical(&registry, dir, "cob", "good");
+}
+
+test "findCanonicalNameByExtension returns null when the cache directory is missing" {
+    const allocator = std.testing.allocator;
+    var registry = LanguageRegistry.init(allocator);
+    defer registry.loaded.deinit();
+    try expectCanonical(&registry, "/definitely/not/a/dir", "cob", null);
+}
+
+test "loadFromDir returns null when the grammar files are not cached" {
+    // loadFromDir references wasm-only symbols that don't link without wasm.
+    if (comptime !build_options.wasm_enabled) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("cobol");
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    var registry = LanguageRegistry.init(allocator);
+    defer registry.loaded.deinit();
+
+    // Directory missing entirely.
+    try std.testing.expect(try registry.loadFromDir(dir, "nope", "nope") == null);
+    // Directory present but empty.
+    try std.testing.expect(try registry.loadFromDir(dir, "cobol", "cobol") == null);
+
+    // Only the wasm is present: still not loadable, and nothing is registered.
+    var cobol = try tmp.dir.openDir("cobol", .{});
+    defer cobol.close();
+    try cobol.writeFile(.{ .sub_path = "grammar.wasm", .data = "\x00asm" });
+    try std.testing.expect(try registry.loadFromDir(dir, "cobol", "cobol") == null);
+    try std.testing.expectEqual(@as(u32, 0), registry.loaded.count());
+    try std.testing.expect(registry.wasm_store == null);
+}
+
+test "resolve returns null for a language that is not cached" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    @import("config.zig").home_dir_override = home;
+    defer @import("config.zig").home_dir_override = null;
+
+    var registry = LanguageRegistry.init(allocator);
+    defer registry.loaded.deinit();
+
+    try std.testing.expect(try registry.resolve("cobol") == null);
+
+    try tmp.dir.makePath(".znip/grammars");
+    try std.testing.expect(try registry.resolve("cobol") == null);
+    try std.testing.expect(registry.wasm_store == null);
+}
+
+test "resolve returns an already-loaded language without touching the disk" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // Point HOME somewhere that has nothing, so only the in-memory entry can hit.
+    @import("config.zig").home_dir_override = "/definitely/not/a/home";
+    defer @import("config.zig").home_dir_override = null;
+
+    var registry = LanguageRegistry.init(arena.allocator());
+    try registry.loaded.put("json-alias", .{
+        .name = "json",
+        .ts_language = tree_sitter_json(),
+        .highlights_query = HighlightsQueryMap.json,
+    });
+
+    if (comptime !build_options.wasm_enabled) {
+        // Without wasm support the registry never resolves anything.
+        try std.testing.expect(try registry.resolve("json-alias") == null);
+        return;
+    }
+
+    const found = (try registry.resolve("json-alias")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("json", found.name);
+    try std.testing.expect(found.ts_language == tree_sitter_json());
+    try std.testing.expectEqual(registry.loaded.getPtr("json-alias").?, found);
+}
+
+test "a Parser with a registry still uses native grammars for known languages" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var registry = LanguageRegistry.init(allocator);
+    var parser = Parser.init(allocator, "const x = 1;\n", "a.zig");
+    parser.attachRegistry(&registry);
+
+    try expectNative(.zig, try parser.detectLanguage());
+    try std.testing.expect(registry.wasm_store == null);
+}
+
+test "a Parser with a registry reports an uncached explicit language as unavailable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realpathAlloc(allocator, ".");
+    @import("config.zig").home_dir_override = home;
+    defer @import("config.zig").home_dir_override = null;
+
+    var registry = LanguageRegistry.init(allocator);
+    var parser = Parser.init(allocator, "MOVE 1 TO X.", null);
+    parser.attachRegistry(&registry);
+    parser.setRequestedLanguage("cobol");
+
+    try std.testing.expectError(error.LanguageNotAvailable, parser.detectLanguage());
+}
+
+test "an unrecognized extension with a registry falls back to content scoring when nothing is cached" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realpathAlloc(allocator, ".");
+    @import("config.zig").home_dir_override = home;
+    defer @import("config.zig").home_dir_override = null;
+
+    var registry = LanguageRegistry.init(allocator);
+    var parser = Parser.init(allocator, "def add(a, b):\n    return a + b\n\nprint(add(1, \"two\"))\n", "prog.cob");
+    parser.attachRegistry(&registry);
+
+    try expectNative(.python, try parser.detectLanguage());
 }

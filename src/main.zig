@@ -30,7 +30,7 @@ fn logFn(
 
 fn expandTilde(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     if (std.mem.eql(u8, path, "~") or std.mem.startsWith(u8, path, "~/")) {
-        const home = try std.process.getEnvVarOwned(allocator, "HOME");
+        const home = try znip.config.homeDir(allocator);
         defer allocator.free(home);
 
         if (std.mem.eql(u8, path, "~")) return try allocator.dupe(u8, home);
@@ -337,4 +337,52 @@ test {
     // exe-side counterpart, for wizard.zig's tests, which would otherwise
     // never run.
     std.testing.refAllDecls(wizard);
+    std.testing.refAllDecls(cli);
+    std.testing.refAllDecls(theme_cli);
+    std.testing.refAllDecls(util_files);
+    std.testing.refAllDecls(util_indent);
 }
+
+test "expandTilde expands a bare tilde to the home directory" {
+    const allocator = std.testing.allocator;
+    znip.config.home_dir_override = "/home/u";
+    defer znip.config.home_dir_override = null;
+
+    const result = try expandTilde(allocator, "~");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("/home/u", result);
+}
+
+test "expandTilde expands a leading ~/ and keeps the rest of the path" {
+    const allocator = std.testing.allocator;
+    znip.config.home_dir_override = "/home/u";
+    defer znip.config.home_dir_override = null;
+
+    const result = try expandTilde(allocator, "~/images/out");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("/home/u/images/out", result);
+}
+
+test "expandTilde leaves every other path untouched" {
+    const allocator = std.testing.allocator;
+    znip.config.home_dir_override = "/home/u";
+    defer znip.config.home_dir_override = null;
+
+    const paths = [_][]const u8{ "/abs/path", "relative/dir", "./here", "", "~user/x", "a/~/b", "dir~", "~~" };
+    for (paths) |path| {
+        const result = try expandTilde(allocator, path);
+        defer allocator.free(result);
+        try std.testing.expectEqualStrings(path, result);
+    }
+}
+
+test "expandTilde with a trailing slash resolves to the home directory" {
+    const allocator = std.testing.allocator;
+    znip.config.home_dir_override = "/home/u";
+    defer znip.config.home_dir_override = null;
+
+    const result = try expandTilde(allocator, "~/");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("/home/u", result);
+}
+

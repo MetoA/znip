@@ -102,7 +102,11 @@ pub fn build(b: *std.Build) !void {
     exe.root_module.addImport("vaxis", vaxis.module("vaxis"));
 
     // Blend2D configuration
-    exe.linkLibCpp();
+    //
+    // Like Tree-sitter below, Blend2D is attached to `mod` only (and `exe`
+    // inherits it by importing `mod`), so that `mod_tests` can link and test
+    // the renderer and font code that calls into it.
+    mod.link_libcpp = true;
     var b2d_flags = std.ArrayList([]const u8).empty;
     try b2d_flags.appendSlice(b.allocator, &.{
         "-std=c++17",
@@ -119,12 +123,10 @@ pub fn build(b: *std.Build) !void {
     } else if (target.result.cpu.arch.isArm()) {
         try b2d_flags.append(b.allocator, "-mfpu=neon");
     }
-    exe.addIncludePath(b.path("vendor/blend2d"));
-    exe.addIncludePath(b.path("vendor/blend2d/3rdparty/asmjit"));
     mod.addIncludePath(b.path("vendor/blend2d"));
     mod.addIncludePath(b.path("vendor/blend2d/3rdparty/asmjit"));
-    addSourceFilesFromDir(b, exe, "vendor/blend2d/blend2d", b2d_flags.items);
-    addSourceFilesFromDir(b, exe, "vendor/blend2d/3rdparty/asmjit/asmjit", b2d_flags.items);
+    addSourceFilesFromDir(b, mod, "vendor/blend2d/blend2d", b2d_flags.items);
+    addSourceFilesFromDir(b, mod, "vendor/blend2d/3rdparty/asmjit/asmjit", b2d_flags.items);
     
     // Tree-sitter configuration
     //
@@ -296,7 +298,7 @@ fn hasScanner(scanner: []u8) bool {
     return true;
 }
 
-fn addSourceFilesFromDir(b: *std.Build, exe: *std.Build.Step.Compile, dir_path: []const u8, cpp_flags: []const []const u8) void {
+fn addSourceFilesFromDir(b: *std.Build, mod: *std.Build.Module, dir_path: []const u8, cpp_flags: []const []const u8) void {
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
 
@@ -317,6 +319,6 @@ fn addSourceFilesFromDir(b: *std.Build, exe: *std.Build.Step.Compile, dir_path: 
             std.mem.containsAtLeast(u8, path, 1, "sample")) continue;
 
         const full_path = b.pathJoin(&.{ dir_path, path });
-        exe.addCSourceFile(.{ .file = b.path(full_path), .flags = cpp_flags });
+        mod.addCSourceFile(.{ .file = b.path(full_path), .flags = cpp_flags });
     }
 }

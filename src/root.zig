@@ -157,8 +157,198 @@ fn promptYesNo() bool {
     return answer.len > 0 and (answer[0] == 'y' or answer[0] == 'Y');
 }
 
+fn e2ePreset() Preset {
+    return .{
+        .name = "e2e",
+        .theme = "One Darker",
+        .font = "JetBrainsMono-Bold",
+        .font_size = 16,
+        .window_controls = true,
+        .show_file_name = true,
+        .vertical_padding_px = 30,
+        .horizontal_padding_px = 30,
+        .include_drop_shadow = true,
+        .transparent_background = false,
+    };
+}
+
+const PngInfo = struct { width: u32, height: u32 };
+
+/// Reads the dimensions from a PNG's IHDR chunk, checking the signature.
+fn readPngInfo(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8) !PngInfo {
+    const bytes = try dir.readFileAlloc(allocator, name, 32 * 1024 * 1024);
+    defer allocator.free(bytes);
+    try std.testing.expect(bytes.len > 33);
+    try std.testing.expectEqualSlices(u8, "\x89PNG\r\n\x1a\n", bytes[0..8]);
+    try std.testing.expectEqualSlices(u8, "IHDR", bytes[12..16]);
+    return .{
+        .width = std.mem.readInt(u32, bytes[16..20], .big),
+        .height = std.mem.readInt(u32, bytes[20..24], .big),
+    };
+}
+
+/// Renders `source` into a fresh temp dir and returns the PNG's dimensions.
+fn renderToPng(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    hint: ?[]const u8,
+    preset: Preset,
+    lang: ?[]const u8,
+    starting_line: u32,
+    highlights: []const usize,
+) !PngInfo {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+    const path = try std.fs.path.join(allocator, &.{ dir, "out.png" });
+    defer allocator.free(path);
+
+    try renderImage(source, path, hint, preset, theme.OneDarker, lang, true, starting_line, highlights);
+    return readPngInfo(allocator, tmp.dir, "out.png");
+}
+
+test "renderImage writes a PNG for a source file" {
+    const info = try renderToPng(std.testing.allocator, "const x: u32 = 5;\n", "main.zig", e2ePreset(), null, 1, &.{});
+    // Window is at least 320 wide, plus padding on both sides.
+    try std.testing.expect(info.width >= 320 + 60);
+    try std.testing.expect(info.height > 60);
+}
+
+test "renderImage works for an explicit language and for piped input without a path" {
+    const rust = try renderToPng(std.testing.allocator, "fn main() {\n    println!(\"hi\");\n}\n", null, e2ePreset(), "rust", 1, &.{});
+    try std.testing.expect(rust.width > 0 and rust.height > 0);
+
+    const detected = try renderToPng(std.testing.allocator, "def add(a, b):\n    return a + b\n", null, e2ePreset(), null, 1, &.{});
+    try std.testing.expect(detected.width > 0 and detected.height > 0);
+}
+
+test "renderImage renders every native language" {
+    const samples = [_]struct { []const u8, [:0]const u8 }{
+        .{ "zig", "const a = 1;\n" },
+        .{ "rust", "fn f() {}\n" },
+        .{ "python", "x = 1\n" },
+        .{ "javascript", "let x = 1;\n" },
+        .{ "typescript", "let x: number = 1;\n" },
+        .{ "c", "int main(void) { return 0; }\n" },
+        .{ "cpp", "int main() { return 0; }\n" },
+        .{ "go", "package main\n" },
+        .{ "html", "<p>hi</p>\n" },
+        .{ "css", "a { color: red; }\n" },
+        .{ "java", "class A {}\n" },
+        .{ "ruby", "puts 1\n" },
+        .{ "json", "{\"a\": 1}\n" },
+        .{ "php", "<?php echo 1;\n" },
+        .{ "markdown", "# Title\n" },
+        .{ "sql", "SELECT 1;\n" },
+    };
+    for (samples) |sample| {
+        const info = try renderToPng(std.testing.allocator, sample[1], null, e2ePreset(), sample[0], 1, &.{});
+        try std.testing.expect(info.width > 0 and info.height > 0);
+    }
+}
+
+test "renderImage output grows taller with more lines" {
+    const one = try renderToPng(std.testing.allocator, "a = 1\n", "a.py", e2ePreset(), null, 1, &.{});
+    const ten = try renderToPng(std.testing.allocator, "a = 1\nb = 2\nc = 3\nd = 4\ne = 5\nf = 6\ng = 7\nh = 8\ni = 9\nj = 10\n", "a.py", e2ePreset(), null, 1, &.{});
+    try std.testing.expectEqual(one.width, ten.width);
+    try std.testing.expect(ten.height > one.height + 8 * 15);
+}
+
+test "renderImage caps the width of very long lines" {
+    const long_line = "x = \"" ++ "a" ** 1500 ++ "\"\n";
+    const info = try renderToPng(std.testing.allocator, long_line, "a.py", e2ePreset(), null, 1, &.{});
+    try std.testing.expectEqual(@as(u32, 900 + 2 * 30), info.width);
+}
+
+test "renderImage sizes short code to the minimum window width" {
+    const info = try renderToPng(std.testing.allocator, "x\n", "a.py", e2ePreset(), null, 1, &.{});
+    try std.testing.expectEqual(@as(u32, 320 + 2 * 30), info.width);
+}
+
+test "renderImage respects the padding in the preset" {
+    var wide = e2ePreset();
+    wide.horizontal_padding_px = 100;
+    wide.vertical_padding_px = 100;
+    const base = try renderToPng(std.testing.allocator, "x = 1\n", "a.py", e2ePreset(), null, 1, &.{});
+    const padded = try renderToPng(std.testing.allocator, "x = 1\n", "a.py", wide, null, 1, &.{});
+    try std.testing.expectEqual(base.width + 140, padded.width);
+    try std.testing.expect(padded.height > base.height);
+}
+
+test "renderImage accepts highlights, a line offset and a transparent canvas" {
+    var preset = e2ePreset();
+    preset.transparent_background = true;
+    preset.show_file_name = false;
+    preset.window_controls = false;
+    const info = try renderToPng(std.testing.allocator, "a = 1\nb = 2\nc = 3\n", "a.py", preset, null, 40, &.{ 41, 42 });
+    try std.testing.expect(info.width > 0 and info.height > 0);
+}
+
+test "renderImage is deterministic for identical input" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const source: [:0]const u8 = "fn main() {\n    let x = 1;\n}\n";
+    for ([_][]const u8{ "one.png", "two.png" }) |name| {
+        const path = try std.fs.path.join(allocator, &.{ dir, name });
+        defer allocator.free(path);
+        try renderImage(source, path, "main.rs", e2ePreset(), theme.OneDarker, null, true, 1, &.{2});
+    }
+
+    const one = try tmp.dir.readFileAlloc(allocator, "one.png", 32 * 1024 * 1024);
+    defer allocator.free(one);
+    const two = try tmp.dir.readFileAlloc(allocator, "two.png", 32 * 1024 * 1024);
+    defer allocator.free(two);
+    try std.testing.expectEqualSlices(u8, one, two);
+}
+
+test "renderImage output differs between themes" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const themes = [_]theme.Theme{ theme.OneDarker, theme.PaperWhite };
+    const names = [_][]const u8{ "dark.png", "light.png" };
+    for (themes, names) |t, name| {
+        const path = try std.fs.path.join(allocator, &.{ dir, name });
+        defer allocator.free(path);
+        try renderImage("x = 1\n", path, "a.py", e2ePreset(), t, null, true, 1, &.{});
+    }
+
+    const dark = try tmp.dir.readFileAlloc(allocator, "dark.png", 32 * 1024 * 1024);
+    defer allocator.free(dark);
+    const light = try tmp.dir.readFileAlloc(allocator, "light.png", 32 * 1024 * 1024);
+    defer allocator.free(light);
+    try std.testing.expect(!std.mem.eql(u8, dark, light));
+}
+
+test "renderImage fails cleanly when the output path is not writable" {
+    try std.testing.expectError(
+        error.ImageWriteFailed,
+        renderImage("x = 1\n", "/definitely/not/a/dir/out.png", "a.py", e2ePreset(), theme.OneDarker, null, true, 1, &.{}),
+    );
+}
+
+test "renderImage handles empty and whitespace-only input" {
+    const empty = try renderToPng(std.testing.allocator, "", null, e2ePreset(), null, 1, &.{});
+    try std.testing.expect(empty.width > 0 and empty.height > 0);
+    const blank = try renderToPng(std.testing.allocator, "   \n\n  \n", null, e2ePreset(), null, 1, &.{});
+    try std.testing.expect(blank.height > empty.height);
+}
+
 test {
     std.testing.refAllDecls(tree_sitter);
     std.testing.refAllDecls(grammar_cache);
+    std.testing.refAllDecls(config);
+    std.testing.refAllDecls(theme_module);
+    std.testing.refAllDecls(fonts_module);
+    std.testing.refAllDecls(@import("ui/renderer.zig"));
+    std.testing.refAllDecls(@import("util/split_inclusive_iterator.zig"));
 }
 

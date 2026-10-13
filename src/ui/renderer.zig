@@ -18,6 +18,10 @@ const box_shadow_offset_y: f64 = 5.0;
 const box_shadow_blur: f64 = 20.0;
 const box_shadow_color: u32 = 0x10000000;
 const line_continuation_arrow_width: f64 = 14.0;
+// The window is sized so its widest line ends exactly on the wrap threshold;
+// without a tolerance, floating-point noise from summing advances in a
+// different order decides whether that line's last word wraps.
+const wrap_tolerance: f64 = 0.01;
 
 pub const Renderer = struct {
     image: c.BLImageCore = undefined,
@@ -208,7 +212,7 @@ pub const Renderer = struct {
                         var text_metrics: c.BLTextMetrics = undefined;
                         self.calculateTextMetrics(&text_metrics, word);
 
-                        if (pen.x + text_metrics.advance.x + font_metrics.char_width > wrap_x) {
+                        if (pen.x + text_metrics.advance.x + font_metrics.char_width > wrap_x + wrap_tolerance) {
                             try drawableChunks.append(self.allocator, .{
                                 .type = ChunkType.wrap_indicator,
                                 .x = pen.x + 5.0,
@@ -292,7 +296,12 @@ pub const Renderer = struct {
     }
 
     pub fn fillBackground(self: *Renderer) void {
-        if (self.preset.transparent_background) return;
+        if (self.preset.transparent_background) {
+            // bl_image_create doesn't zero the pixel buffer, so a transparent
+            // canvas has to be cleared explicitly or it shows stale memory.
+            _ = c.bl_context_clear_all(&self.context);
+            return;
+        }
         _ = c.bl_context_set_fill_style_rgba32(&self.context, self.active_theme.ui.background);
         _ = c.bl_context_fill_all(&self.context);
     }
@@ -536,3 +545,916 @@ const Pen = struct {
         self.x = self.num_starting_x;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const Token = tree_sitter.Token;
+
+fn testPreset() Preset {
+    return .{
+        .name = "test",
+        .theme = "One Darker",
+        .font = fonts.default_font_name,
+        .font_size = 16,
+        .window_controls = true,
+        .show_file_name = true,
+        .vertical_padding_px = 40,
+        .horizontal_padding_px = 40,
+        .include_drop_shadow = false,
+        .transparent_background = false,
+    };
+}
+
+fn tok(text: []const u8, capture: []const u8) Token {
+    return .{ .text = text, .capture_name = capture, .is_newline = false };
+}
+
+const newline_token = Token{ .text = "\n", .capture_name = "", .is_newline = true };
+
+fn newRenderer(allocator: std.mem.Allocator, preset: Preset, file_name: ?[]const u8) !Renderer {
+    return Renderer.init(allocator, preset, theme.OneDarker, file_name);
+}
+
+/// Mirrors the drawing pipeline in `root.renderImage`, stopping before the PNG
+/// is written so the in-memory image can be inspected.
+fn drawAll(r: *Renderer, tokens: []const Token, starting_line: u32, highlight_lines: []const usize) !void {
+    var prepared = try r.prepareDrawableChunks(tokens, starting_line, highlight_lines);
+    const last_y: f64 = if (prepared.chunks.items.len > 0) prepared.chunks.getLast().y else 300.0;
+    r.initImage(last_y);
+    r.fillBackground();
+    try r.drawCodeWindow(last_y);
+    r.drawHighlights(prepared.highlights.items);
+    r.drawCodeWindowControls();
+    r.drawFileName();
+    try r.drawChunks(prepared.chunks.items);
+}
+
+fn imageData(r: *Renderer) c.BLImageData {
+    var data: c.BLImageData = undefined;
+    _ = c.bl_image_get_data(&r.image, &data);
+    return data;
+}
+
+fn imageWidth(r: *Renderer) usize {
+    return @intCast(imageData(r).size.w);
+}
+
+fn imageHeight(r: *Renderer) usize {
+    return @intCast(imageData(r).size.h);
+}
+
+/// Premultiplied 0xAARRGGBB.
+fn pixelAt(r: *Renderer, x: usize, y: usize) u32 {
+    const data = imageData(r);
+    const base: [*]const u8 = @ptrCast(data.pixel_data.?);
+    const stride: usize = @intCast(data.stride);
+    const p: *align(1) const u32 = @ptrCast(base + y * stride + x * 4);
+    return p.*;
+}
+
+/// A copy of every pixel row, for whole-image comparisons.
+fn snapshot(allocator: std.mem.Allocator, r: *Renderer) ![]u8 {
+    const data = imageData(r);
+    const w = imageWidth(r);
+    const h = imageHeight(r);
+    const base: [*]const u8 = @ptrCast(data.pixel_data.?);
+    const stride: usize = @intCast(data.stride);
+
+    const out = try allocator.alloc(u8, w * h * 4);
+    for (0..h) |row| {
+        @memcpy(out[row * w * 4 ..][0 .. w * 4], base[row * stride ..][0 .. w * 4]);
+    }
+    return out;
+}
+
+fn countType(chunks: []const DrawableChunk, chunk_type: ChunkType) usize {
+    var n: usize = 0;
+    for (chunks) |chunk| {
+        if (chunk.type == chunk_type) n += 1;
+    }
+    return n;
+}
+
+/// Line-number chunks are the text chunks drawn in the gutter, left of the code.
+fn lineNumberChunks(allocator: std.mem.Allocator, r: *Renderer, chunks: []const DrawableChunk) ![]DrawableChunk {
+    const text_x = @as(f64, @floatFromInt(r.preset.horizontal_padding_px)) + 50.0;
+    var out = std.ArrayList(DrawableChunk).empty;
+    for (chunks) |chunk| {
+        if (chunk.type == .text and chunk.x < text_x) try out.append(allocator, chunk);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn codeText(allocator: std.mem.Allocator, r: *Renderer, chunks: []const DrawableChunk) ![]u8 {
+    const text_x = @as(f64, @floatFromInt(r.preset.horizontal_padding_px)) + 50.0;
+    var out = std.ArrayList(u8).empty;
+    for (chunks) |chunk| {
+        if (chunk.type == .text and chunk.x >= text_x) try out.appendSlice(allocator, chunk.text);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "lineIsHighlighted finds a line in the list" {
+    try std.testing.expect(lineIsHighlighted(&.{ 2, 5, 9 }, 5));
+    try std.testing.expect(lineIsHighlighted(&.{7}, 7));
+}
+
+test "lineIsHighlighted is false for absent lines and an empty list" {
+    try std.testing.expect(!lineIsHighlighted(&.{ 2, 5, 9 }, 4));
+    try std.testing.expect(!lineIsHighlighted(&.{ 2, 5, 9 }, 0));
+    try std.testing.expect(!lineIsHighlighted(&.{}, 1));
+}
+
+test "Pen starts at the line-number column" {
+    const pen = Pen.init(45.0, 90.0, 120.0, 20.0, 7);
+    try std.testing.expectEqual(@as(f64, 45.0), pen.x);
+    try std.testing.expectEqual(@as(f64, 120.0), pen.y);
+    try std.testing.expectEqual(@as(u32, 7), pen.line_num);
+}
+
+test "Pen.nextLine moves down one line and increments the line number" {
+    var pen = Pen.init(0, 0, 100.0, 20.0, 1);
+    pen.nextLine();
+    pen.nextLine();
+    try std.testing.expectEqual(@as(f64, 140.0), pen.y);
+    try std.testing.expectEqual(@as(u32, 3), pen.line_num);
+}
+
+test "Pen.nextLineIndentation moves down without changing the line number" {
+    var pen = Pen.init(0, 0, 100.0, 20.0, 4);
+    pen.nextLineIndentation();
+    try std.testing.expectEqual(@as(f64, 120.0), pen.y);
+    try std.testing.expectEqual(@as(u32, 4), pen.line_num);
+}
+
+test "Pen horizontal moves" {
+    var pen = Pen.init(45.0, 90.0, 0, 20.0, 1);
+    pen.positionAtTextStart();
+    try std.testing.expectEqual(@as(f64, 90.0), pen.x);
+    pen.advanceX(10.5);
+    pen.advanceX(4.5);
+    try std.testing.expectEqual(@as(f64, 105.0), pen.x);
+    pen.positionAtNumStart();
+    try std.testing.expectEqual(@as(f64, 45.0), pen.x);
+    // Horizontal moves never touch the vertical position.
+    try std.testing.expectEqual(@as(f64, 0), pen.y);
+}
+
+test "Pen vertical moves leave the column alone" {
+    var pen = Pen.init(45.0, 90.0, 0, 20.0, 1);
+    pen.advanceX(10.0);
+    pen.nextLine();
+    try std.testing.expectEqual(@as(f64, 55.0), pen.x);
+}
+
+test "Renderer init and deinit with the bundled font" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    r.deinit();
+}
+
+test "fontMetrics derives layout values from the font and preset" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const m = r.fontMetrics();
+    try std.testing.expect(m.ascent > 0);
+    try std.testing.expect(m.descent > 0);
+    try std.testing.expect(m.line_height >= m.ascent + m.descent);
+    try std.testing.expectApproxEqAbs(m.ascent * 0.6, m.char_width, 1e-4);
+    try std.testing.expectEqual(@as(f32, 90.0), m.margin_x); // 40 + 50
+    try std.testing.expectEqual(@as(f32, 90.0), m.margin_y); // 40 + 50 header
+}
+
+test "fontMetrics header is shorter without window controls or a file name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var preset = testPreset();
+    preset.window_controls = false;
+
+    var bare = try newRenderer(arena.allocator(), preset, null);
+    defer bare.deinit();
+    try std.testing.expectEqual(@as(f32, 60.0), bare.fontMetrics().margin_y); // 40 + 20
+
+    var named = try newRenderer(arena.allocator(), preset, "main.zig");
+    defer named.deinit();
+    try std.testing.expectEqual(@as(f32, 90.0), named.fontMetrics().margin_y); // file name needs the tall header
+
+    preset.window_controls = true;
+    var controls = try newRenderer(arena.allocator(), preset, null);
+    defer controls.deinit();
+    try std.testing.expectEqual(@as(f32, 90.0), controls.fontMetrics().margin_y);
+}
+
+test "fontMetrics scales with the font size and padding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var small_preset = testPreset();
+    small_preset.font_size = 12;
+    var large_preset = testPreset();
+    large_preset.font_size = 24;
+    large_preset.horizontal_padding_px = 100;
+    large_preset.vertical_padding_px = 10;
+
+    var small = try newRenderer(arena.allocator(), small_preset, null);
+    defer small.deinit();
+    var large = try newRenderer(arena.allocator(), large_preset, null);
+    defer large.deinit();
+
+    const sm = small.fontMetrics();
+    const lm = large.fontMetrics();
+    try std.testing.expectApproxEqAbs(sm.line_height * 2.0, lm.line_height, 0.1);
+    try std.testing.expectApproxEqAbs(sm.char_width * 2.0, lm.char_width, 0.01);
+    try std.testing.expectEqual(@as(f32, 150.0), lm.margin_x);
+    try std.testing.expectEqual(@as(f32, 60.0), lm.margin_y);
+}
+
+test "measureMaxLineWidth of nothing is zero" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    try std.testing.expectEqual(@as(f64, 0.0), r.measureMaxLineWidth(&.{}));
+    try std.testing.expectEqual(@as(f64, 0.0), r.measureMaxLineWidth(&.{newline_token}));
+}
+
+test "measureMaxLineWidth scales with the number of characters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const one = r.measureMaxLineWidth(&.{tok("a", "x")});
+    const four = r.measureMaxLineWidth(&.{tok("abcd", "x")});
+    try std.testing.expect(one > 0);
+    // The bundled font is monospaced.
+    try std.testing.expectApproxEqAbs(one * 4.0, four, 0.01);
+}
+
+test "measureMaxLineWidth takes the widest line, wherever it is" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const widest = r.measureMaxLineWidth(&.{tok("abcdef", "x")});
+    try std.testing.expectApproxEqAbs(widest, r.measureMaxLineWidth(&.{tok("ab\nabcdef\nabc", "x")}), 0.01);
+    try std.testing.expectApproxEqAbs(widest, r.measureMaxLineWidth(&.{ tok("abcdef", "x"), newline_token, tok("ab", "x") }), 0.01);
+    try std.testing.expectApproxEqAbs(widest, r.measureMaxLineWidth(&.{ tok("ab", "x"), newline_token, tok("abcdef", "x") }), 0.01);
+}
+
+test "measureMaxLineWidth sums tokens that share a line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const whole = r.measureMaxLineWidth(&.{tok("abcd", "x")});
+    const split = r.measureMaxLineWidth(&.{ tok("ab", "x"), tok("", ""), tok("cd", "y") });
+    try std.testing.expectApproxEqAbs(whole, split, 0.01);
+}
+
+test "prepareDrawableChunks emits a line number then each word of a single line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{ tok("fn", "keyword"), tok(" ", ""), tok("main", "function") }, 1, &.{});
+    const chunks = prepared.chunks.items;
+    const m = r.fontMetrics();
+
+    try std.testing.expectEqual(@as(usize, 4), chunks.len);
+    try std.testing.expectEqualStrings("  1", chunks[0].text);
+    try std.testing.expectEqualStrings("fn", chunks[1].text);
+    try std.testing.expectEqualStrings(" ", chunks[2].text);
+    try std.testing.expectEqualStrings("main", chunks[3].text);
+
+    // Gutter first, then the code, left to right on one baseline.
+    try std.testing.expectEqual(@as(f64, 45.0), chunks[0].x);
+    try std.testing.expectEqual(@as(f64, m.margin_x), chunks[1].x);
+    try std.testing.expect(chunks[2].x > chunks[1].x);
+    try std.testing.expect(chunks[3].x > chunks[2].x);
+    for (chunks) |chunk| try std.testing.expectApproxEqAbs(@as(f64, m.margin_y + m.ascent), chunk.y, 1e-4);
+
+    try std.testing.expectEqual(@as(usize, 0), prepared.highlights.items.len);
+}
+
+test "prepareDrawableChunks colors tokens from the theme" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{ tok("fn", "keyword"), tok("x", "number"), tok("?", "mystery.capture"), tok("y", "") }, 1, &.{});
+    const chunks = prepared.chunks.items;
+
+    try std.testing.expectEqual(r.active_theme.getColor(.keyword), chunks[1].color);
+    try std.testing.expectEqual(r.active_theme.getColor(.number), chunks[2].color);
+    // Unknown and missing captures use the default text color.
+    try std.testing.expectEqual(r.active_theme.ui.foreground, chunks[3].color);
+    try std.testing.expectEqual(r.active_theme.ui.foreground, chunks[4].color);
+    // Line numbers are dimmed.
+    try std.testing.expectEqual(r.active_theme.ui.line_number, chunks[0].color);
+}
+
+test "prepareDrawableChunks numbers each line and steps down one line height" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{ tok("a", "x"), newline_token, tok("b", "x"), newline_token, tok("c", "x") }, 1, &.{});
+    const numbers = try lineNumberChunks(allocator, &r, prepared.chunks.items);
+    const m = r.fontMetrics();
+
+    try std.testing.expectEqual(@as(usize, 3), numbers.len);
+    try std.testing.expectEqualStrings("  1", numbers[0].text);
+    try std.testing.expectEqualStrings("  2", numbers[1].text);
+    try std.testing.expectEqualStrings("  3", numbers[2].text);
+    try std.testing.expectApproxEqAbs(numbers[0].y + m.line_height, numbers[1].y, 1e-3);
+    try std.testing.expectApproxEqAbs(numbers[1].y + m.line_height, numbers[2].y, 1e-3);
+
+    const text = try codeText(allocator, &r, prepared.chunks.items);
+    try std.testing.expectEqualStrings("abc", text);
+}
+
+test "prepareDrawableChunks splits a multi-line token into numbered lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{tok("/* a\n b\n c */", "comment")}, 1, &.{});
+    const numbers = try lineNumberChunks(allocator, &r, prepared.chunks.items);
+    try std.testing.expectEqual(@as(usize, 3), numbers.len);
+    try std.testing.expectEqualStrings("  3", numbers[2].text);
+}
+
+test "prepareDrawableChunks of no tokens is just the first line number" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{}, 1, &.{});
+    try std.testing.expectEqual(@as(usize, 1), prepared.chunks.items.len);
+    try std.testing.expectEqualStrings("  1", prepared.chunks.items[0].text);
+    try std.testing.expectEqual(code_window_min_width, r.content_width);
+}
+
+test "prepareDrawableChunks starts numbering at the requested line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{ tok("a", "x"), newline_token, tok("b", "x"), newline_token, tok("c", "x") }, 98, &.{});
+    const numbers = try lineNumberChunks(allocator, &r, prepared.chunks.items);
+    try std.testing.expectEqualStrings(" 98", numbers[0].text);
+    try std.testing.expectEqualStrings(" 99", numbers[1].text);
+    try std.testing.expectEqualStrings("100", numbers[2].text);
+}
+
+test "prepareDrawableChunks brightens highlighted line numbers only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{ tok("a", "x"), newline_token, tok("b", "x"), newline_token, tok("c", "x") }, 1, &.{2});
+    const numbers = try lineNumberChunks(allocator, &r, prepared.chunks.items);
+    try std.testing.expectEqual(r.active_theme.ui.line_number, numbers[0].color);
+    try std.testing.expectEqual(r.active_theme.ui.foreground, numbers[1].color);
+    try std.testing.expectEqual(r.active_theme.ui.line_number, numbers[2].color);
+}
+
+test "prepareDrawableChunks emits one highlight rectangle per highlighted line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const tokens = [_]Token{ tok("a", "x"), newline_token, tok("b", "x"), newline_token, tok("c", "x") };
+    const prepared = try r.prepareDrawableChunks(&tokens, 1, &.{ 1, 3 });
+    const m = r.fontMetrics();
+
+    try std.testing.expectEqual(@as(usize, 2), prepared.highlights.items.len);
+    const first = prepared.highlights.items[0];
+    const last = prepared.highlights.items[1];
+
+    try std.testing.expectEqual(@as(f64, 40.0), first.x);
+    try std.testing.expectEqual(r.content_width, first.w);
+    try std.testing.expectApproxEqAbs(@as(f64, m.margin_y), first.y, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f64, m.line_height), first.h, 1e-3);
+    // The final line has no trailing newline but is still highlighted.
+    try std.testing.expectApproxEqAbs(@as(f64, m.margin_y + 2 * m.line_height), last.y, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f64, m.line_height), last.h, 1e-3);
+}
+
+test "prepareDrawableChunks ignores highlight lines outside the rendered range" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const tokens = [_]Token{ tok("a", "x"), newline_token, tok("b", "x") };
+    const prepared = try r.prepareDrawableChunks(&tokens, 10, &.{ 1, 9, 12, 500 });
+    try std.testing.expectEqual(@as(usize, 0), prepared.highlights.items.len);
+}
+
+test "prepareDrawableChunks highlight lines use the starting line offset" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const tokens = [_]Token{ tok("a", "x"), newline_token, tok("b", "x") };
+    const prepared = try r.prepareDrawableChunks(&tokens, 10, &.{11});
+    const m = r.fontMetrics();
+
+    try std.testing.expectEqual(@as(usize, 1), prepared.highlights.items.len);
+    try std.testing.expectApproxEqAbs(@as(f64, m.margin_y + m.line_height), prepared.highlights.items[0].y, 1e-3);
+}
+
+test "prepareDrawableChunks highlights a single-line source" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{tok("only", "x")}, 1, &.{1});
+    try std.testing.expectEqual(@as(usize, 1), prepared.highlights.items.len);
+}
+
+test "prepareDrawableChunks sizes the window to the widest line within the limits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    // Short code: the minimum width.
+    _ = try r.prepareDrawableChunks(&.{tok("a", "x")}, 1, &.{});
+    try std.testing.expectEqual(code_window_min_width, r.content_width);
+
+    // A line in between is sized to fit: gutter + line + slack + one char.
+    const medium = [_]Token{tok("x" ** 50, "x")};
+    _ = try r.prepareDrawableChunks(&medium, 1, &.{});
+    const expected = code_window_gutter_width + r.measureMaxLineWidth(&medium) + code_window_right_slack + @as(f64, r.fontMetrics().char_width);
+    try std.testing.expect(expected > code_window_min_width and expected < code_window_max_width);
+    try std.testing.expectApproxEqAbs(expected, r.content_width, 1e-6);
+
+    // A very long line: capped at the maximum width.
+    const long = [_]Token{tok("x" ** 400, "x")};
+    _ = try r.prepareDrawableChunks(&long, 1, &.{});
+    try std.testing.expectEqual(code_window_max_width, r.content_width);
+}
+
+test "prepareDrawableChunks keeps every word of a line that fits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{tok("a b  c", "x")}, 1, &.{});
+    try std.testing.expectEqual(@as(usize, 0), countType(prepared.chunks.items, .wrap_indicator));
+    try std.testing.expectEqual(@as(usize, 0), countType(prepared.chunks.items, .line_continuation));
+    try std.testing.expectEqualStrings("a b  c", try codeText(allocator, &r, prepared.chunks.items));
+}
+
+test "prepareDrawableChunks wraps an over-long line without renumbering it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), null);
+    defer r.deinit();
+
+    const long_line = "word " ** 200;
+    const prepared = try r.prepareDrawableChunks(&.{tok(long_line, "string")}, 1, &.{1});
+    const chunks = prepared.chunks.items;
+    const m = r.fontMetrics();
+
+    try std.testing.expectEqual(code_window_max_width, r.content_width);
+
+    const wraps = countType(chunks, .wrap_indicator);
+    try std.testing.expect(wraps > 0);
+    try std.testing.expectEqual(wraps, countType(chunks, .line_continuation));
+
+    // Still one logical line: one number, and no word spills past the window.
+    const numbers = try lineNumberChunks(allocator, &r, chunks);
+    try std.testing.expectEqual(@as(usize, 1), numbers.len);
+    const wrap_x = 40.0 + r.content_width - code_window_right_slack;
+    for (chunks) |chunk| {
+        if (chunk.type == .text and chunk.x >= 90.0) try std.testing.expect(chunk.x < wrap_x);
+    }
+
+    // The highlight spans every wrapped row.
+    try std.testing.expectEqual(@as(usize, 1), prepared.highlights.items.len);
+    const rows: f64 = @floatFromInt(wraps + 1);
+    try std.testing.expectApproxEqAbs(rows * m.line_height, prepared.highlights.items[0].h, 1e-3);
+
+    // The text itself is untouched apart from where lines were cut.
+    const text = try codeText(allocator, &r, chunks);
+    try std.testing.expect(std.mem.startsWith(u8, text, "word word"));
+}
+
+test "prepareDrawableChunks lays a wrapped line out on successive rows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{tok("word " ** 200, "string")}, 1, &.{});
+    const chunks = prepared.chunks.items;
+    const m = r.fontMetrics();
+
+    var indicator_y: ?f64 = null;
+    var continuation_y: ?f64 = null;
+    for (chunks) |chunk| {
+        if (chunk.type == .wrap_indicator and indicator_y == null) indicator_y = chunk.y;
+        if (chunk.type == .line_continuation and continuation_y == null) continuation_y = chunk.y;
+    }
+    // The wrap arrow is drawn on the row being left; the continuation arrow starts the next one.
+    try std.testing.expectApproxEqAbs(indicator_y.? + m.line_height, continuation_y.?, 1e-3);
+}
+
+test "prepareDrawableChunks handles multi-byte text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), null);
+    defer r.deinit();
+
+    const prepared = try r.prepareDrawableChunks(&.{tok("héllo ✓ wörld", "string")}, 1, &.{});
+    try std.testing.expectEqualStrings("héllo ✓ wörld", try codeText(allocator, &r, prepared.chunks.items));
+}
+
+test "initImage sizes the canvas from the window width, padding and last line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var preset = testPreset();
+    preset.horizontal_padding_px = 10;
+    preset.vertical_padding_px = 20;
+    var r = try newRenderer(arena.allocator(), preset, null);
+    defer r.deinit();
+
+    r.content_width = 400.0;
+    r.initImage(100.5);
+    try std.testing.expectEqual(@as(usize, 420), imageWidth(&r)); // 400 + 2 * 10
+    try std.testing.expectEqual(@as(usize, 145), imageHeight(&r)); // 100.5 + 25 + 20, truncated
+}
+
+test "fillBackground paints the theme background" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    try drawAll(&r, &.{tok("a", "x")}, 1, &.{});
+    try std.testing.expectEqual(r.active_theme.ui.background, pixelAt(&r, 0, 0));
+    try std.testing.expectEqual(r.active_theme.ui.background, pixelAt(&r, imageWidth(&r) - 1, imageHeight(&r) - 1));
+}
+
+test "a transparent canvas leaves the outer area clear but keeps the window opaque" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var preset = testPreset();
+    preset.transparent_background = true;
+    var r = try newRenderer(arena.allocator(), preset, null);
+    defer r.deinit();
+
+    try drawAll(&r, &.{tok("a", "x")}, 1, &.{});
+    try std.testing.expectEqual(@as(u32, 0), pixelAt(&r, 0, 0));
+    try std.testing.expectEqual(@as(u32, 0), pixelAt(&r, imageWidth(&r) - 1, 0));
+
+    const inside_x: usize = @intFromFloat(40.0 + r.content_width - 20.0);
+    try std.testing.expectEqual(r.active_theme.ui.code_window_background, pixelAt(&r, inside_x, 70));
+}
+
+test "the code window is filled with its own background" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    try drawAll(&r, &.{tok("a", "x")}, 1, &.{});
+    const inside_x: usize = @intFromFloat(40.0 + r.content_width - 20.0);
+    try std.testing.expectEqual(r.active_theme.ui.code_window_background, pixelAt(&r, inside_x, 70));
+    // Just inside the left edge, away from the controls row and text.
+    try std.testing.expectEqual(r.active_theme.ui.code_window_background, pixelAt(&r, 44, 45));
+}
+
+test "window controls are drawn in the theme's colors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    try drawAll(&r, &.{tok("a", "x")}, 1, &.{});
+    // Centers at (pad + 25 + 20 * i, pad + 25).
+    try std.testing.expectEqual(r.active_theme.ui.window_close, pixelAt(&r, 65, 65));
+    try std.testing.expectEqual(r.active_theme.ui.window_minimize, pixelAt(&r, 85, 65));
+    try std.testing.expectEqual(r.active_theme.ui.window_expand, pixelAt(&r, 105, 65));
+}
+
+test "window controls are omitted when disabled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var preset = testPreset();
+    preset.window_controls = false;
+    var r = try newRenderer(arena.allocator(), preset, null);
+    defer r.deinit();
+
+    try drawAll(&r, &.{tok("a", "x")}, 1, &.{});
+    try std.testing.expectEqual(r.active_theme.ui.code_window_background, pixelAt(&r, 65, 65));
+}
+
+test "the drop shadow only appears when enabled" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // The shadow is faint (alpha <= 2), so it needs a light background to show up.
+    var flat = try Renderer.init(arena.allocator(), testPreset(), theme.PaperWhite, null);
+    defer flat.deinit();
+    try drawAll(&flat, &.{tok("a", "x")}, 1, &.{});
+
+    var preset = testPreset();
+    preset.include_drop_shadow = true;
+    var shadowed = try Renderer.init(arena.allocator(), preset, theme.PaperWhite, null);
+    defer shadowed.deinit();
+    try drawAll(&shadowed, &.{tok("a", "x")}, 1, &.{});
+
+    // Same canvas, so the pixel just under the window's bottom edge is comparable.
+    try std.testing.expectEqual(imageHeight(&flat), imageHeight(&shadowed));
+    const below_y = imageHeight(&flat) - 40 + 2;
+    const x = imageWidth(&flat) / 2;
+    try std.testing.expectEqual(flat.active_theme.ui.background, pixelAt(&flat, x, below_y));
+    try std.testing.expect(pixelAt(&shadowed, x, below_y) != shadowed.active_theme.ui.background);
+    // The shadow never reaches the canvas corner.
+    try std.testing.expectEqual(shadowed.active_theme.ui.background, pixelAt(&shadowed, 0, 0));
+}
+
+test "a highlighted line is tinted across the window" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var plain = try newRenderer(arena.allocator(), testPreset(), null);
+    defer plain.deinit();
+    try drawAll(&plain, &.{tok("a", "x")}, 1, &.{});
+
+    var marked = try newRenderer(arena.allocator(), testPreset(), null);
+    defer marked.deinit();
+    try drawAll(&marked, &.{tok("a", "x")}, 1, &.{1});
+
+    const x: usize = @intFromFloat(40.0 + plain.content_width - 20.0);
+    const y: usize = 94; // inside the first line's band (margin_y = 90)
+    try std.testing.expectEqual(plain.active_theme.ui.code_window_background, pixelAt(&plain, x, y));
+    try std.testing.expect(pixelAt(&marked, x, y) != marked.active_theme.ui.code_window_background);
+}
+
+test "the file name is only drawn when one is given" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var unnamed = try newRenderer(allocator, testPreset(), null);
+    defer unnamed.deinit();
+    try drawAll(&unnamed, &.{tok("a", "x")}, 1, &.{});
+
+    var named = try newRenderer(allocator, testPreset(), "main.zig");
+    defer named.deinit();
+    try drawAll(&named, &.{tok("a", "x")}, 1, &.{});
+
+    try std.testing.expectEqual(imageWidth(&unnamed), imageWidth(&named));
+    try std.testing.expect(!std.mem.eql(u8, try snapshot(allocator, &unnamed), try snapshot(allocator, &named)));
+}
+
+test "drawing text changes the image" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var empty = try newRenderer(allocator, testPreset(), null);
+    defer empty.deinit();
+    try drawAll(&empty, &.{}, 1, &.{});
+
+    var filled = try newRenderer(allocator, testPreset(), null);
+    defer filled.deinit();
+    try drawAll(&filled, &.{tok("const x = 1;", "keyword")}, 1, &.{});
+
+    try std.testing.expect(!std.mem.eql(u8, try snapshot(allocator, &empty), try snapshot(allocator, &filled)));
+}
+
+test "more lines make a taller image of the same width" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var short = try newRenderer(allocator, testPreset(), null);
+    defer short.deinit();
+    try drawAll(&short, &.{tok("a", "x")}, 1, &.{});
+
+    var tall = try newRenderer(allocator, testPreset(), null);
+    defer tall.deinit();
+    const lines = [_]Token{ tok("a", "x"), newline_token, tok("b", "x"), newline_token, tok("c", "x"), newline_token, tok("d", "x") };
+    try drawAll(&tall, &lines, 1, &.{});
+
+    try std.testing.expectEqual(imageWidth(&short), imageWidth(&tall));
+    try std.testing.expect(imageHeight(&tall) > imageHeight(&short));
+    const line_height: usize = @intFromFloat(short.fontMetrics().line_height);
+    try std.testing.expect(imageHeight(&tall) - imageHeight(&short) >= 3 * line_height - 3);
+}
+
+test "padding grows the image on every side" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tight_preset = testPreset();
+    tight_preset.horizontal_padding_px = 10;
+    tight_preset.vertical_padding_px = 10;
+    var tight = try newRenderer(allocator, tight_preset, null);
+    defer tight.deinit();
+    try drawAll(&tight, &.{tok("a", "x")}, 1, &.{});
+
+    var roomy_preset = testPreset();
+    roomy_preset.horizontal_padding_px = 60;
+    roomy_preset.vertical_padding_px = 30;
+    var roomy = try newRenderer(allocator, roomy_preset, null);
+    defer roomy.deinit();
+    try drawAll(&roomy, &.{tok("a", "x")}, 1, &.{});
+
+    try std.testing.expectEqual(imageWidth(&tight) + 100, imageWidth(&roomy));
+    try std.testing.expect(imageHeight(&roomy) > imageHeight(&tight));
+}
+
+test "rendering is deterministic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const tokens = [_]Token{ tok("fn", "keyword"), tok(" ", ""), tok("main", "function"), newline_token, tok("x", "variable") };
+
+    var first = try newRenderer(allocator, testPreset(), "a.zig");
+    defer first.deinit();
+    try drawAll(&first, &tokens, 1, &.{2});
+
+    var second = try newRenderer(allocator, testPreset(), "a.zig");
+    defer second.deinit();
+    try drawAll(&second, &tokens, 1, &.{2});
+
+    try std.testing.expectEqualSlices(u8, try snapshot(allocator, &first), try snapshot(allocator, &second));
+}
+
+test "the starting line number changes what is drawn but not the size" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var from_one = try newRenderer(allocator, testPreset(), null);
+    defer from_one.deinit();
+    try drawAll(&from_one, &.{tok("a", "x")}, 1, &.{});
+
+    var from_forty = try newRenderer(allocator, testPreset(), null);
+    defer from_forty.deinit();
+    try drawAll(&from_forty, &.{tok("a", "x")}, 40, &.{});
+
+    try std.testing.expectEqual(imageWidth(&from_one), imageWidth(&from_forty));
+    try std.testing.expectEqual(imageHeight(&from_one), imageHeight(&from_forty));
+    try std.testing.expect(!std.mem.eql(u8, try snapshot(allocator, &from_one), try snapshot(allocator, &from_forty)));
+}
+
+test "a larger font size produces a larger image" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const tokens = [_]Token{ tok("x" ** 60, "x"), newline_token, tok("y", "x") };
+
+    var small_preset = testPreset();
+    small_preset.font_size = 12;
+    var small = try newRenderer(allocator, small_preset, null);
+    defer small.deinit();
+    try drawAll(&small, &tokens, 1, &.{});
+
+    var large_preset = testPreset();
+    large_preset.font_size = 24;
+    var large = try newRenderer(allocator, large_preset, null);
+    defer large.deinit();
+    try drawAll(&large, &tokens, 1, &.{});
+
+    try std.testing.expect(imageWidth(&large) > imageWidth(&small));
+    try std.testing.expect(imageHeight(&large) > imageHeight(&small));
+}
+
+test "saveImage writes a PNG whose header matches the image" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), "a.zig");
+    defer r.deinit();
+    try drawAll(&r, &.{tok("const x = 1;", "keyword")}, 1, &.{});
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    const path = try std.fs.path.joinZ(allocator, &.{ dir, "out.png" });
+
+    try r.saveImage(path);
+
+    const bytes = try tmp.dir.readFileAlloc(allocator, "out.png", 16 * 1024 * 1024);
+    try std.testing.expectEqualSlices(u8, "\x89PNG\r\n\x1a\n", bytes[0..8]);
+    try std.testing.expectEqualSlices(u8, "IHDR", bytes[12..16]);
+    try std.testing.expectEqual(@as(u32, @intCast(imageWidth(&r))), std.mem.readInt(u32, bytes[16..20], .big));
+    try std.testing.expectEqual(@as(u32, @intCast(imageHeight(&r))), std.mem.readInt(u32, bytes[20..24], .big));
+}
+
+test "a saved PNG decodes back to the same pixels" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var r = try newRenderer(allocator, testPreset(), null);
+    defer r.deinit();
+    try drawAll(&r, &.{tok("const x = 1;", "keyword")}, 1, &.{1});
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    const path = try std.fs.path.joinZ(allocator, &.{ dir, "round.png" });
+    try r.saveImage(path);
+
+    var decoded: Renderer = try newRenderer(allocator, testPreset(), null);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(c.BLResult, c.BL_SUCCESS), c.bl_image_read_from_file(&decoded.image, path.ptr, null));
+
+    try std.testing.expectEqualSlices(u8, try snapshot(allocator, &r), try snapshot(allocator, &decoded));
+}
+
+test "saveImage reports an unwritable destination" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+    try drawAll(&r, &.{tok("a", "x")}, 1, &.{});
+
+    try std.testing.expectError(error.ImageWriteFailed, r.saveImage("/definitely/not/a/dir/out.png"));
+}
+
+test "prepareDrawableChunks never wraps a line the window was sized to fit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    // Words of varied length, so the widest line ends on a different pixel each time.
+    var n: usize = 12;
+    while (n <= 70) : (n += 1) {
+        var buf: [128]u8 = undefined;
+        var len: usize = 0;
+        var i: usize = 0;
+        while (len < n) : (i += 1) {
+            const word_len = 2 + (i * 3) % 5;
+            for (0..word_len) |_| {
+                if (len < n) {
+                    buf[len] = 'a' + @as(u8, @intCast(i % 26));
+                    len += 1;
+                }
+            }
+            if (len < n) {
+                buf[len] = ' ';
+                len += 1;
+            }
+        }
+
+        const tokens = [_]Token{tok(buf[0..len], "x")};
+        const prepared = try r.prepareDrawableChunks(&tokens, 1, &.{});
+        try std.testing.expect(r.content_width < code_window_max_width);
+        if (countType(prepared.chunks.items, .wrap_indicator) != 0) {
+            std.debug.print("line of {d} chars wrapped inside its own window\n", .{len});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "prepareDrawableChunks does not wrap when the widest of several lines exactly fills the window" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    const tokens = [_]Token{ tok("std.debug.print(\"hi\\n\", .{});", "x"), newline_token, tok("short", "x") };
+    const prepared = try r.prepareDrawableChunks(&tokens, 1, &.{});
+    try std.testing.expectEqual(@as(usize, 0), countType(prepared.chunks.items, .wrap_indicator));
+}

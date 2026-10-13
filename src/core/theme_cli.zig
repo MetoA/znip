@@ -336,3 +336,114 @@ fn runCreate(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     output.ok("Created theme '{s}' at '{s}'.", .{ name, path });
 }
+
+/// Points `$HOME` at a fresh temporary directory with the standard `~/.znip` tree.
+const TmpHome = struct {
+    tmp: std.testing.TmpDir,
+    path: []u8,
+
+    fn init(allocator: std.mem.Allocator) !TmpHome {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const path = try tmp.dir.realpathAlloc(allocator, ".");
+        config.home_dir_override = path;
+        errdefer config.home_dir_override = null;
+        try config.createRootConfigDirectories(allocator);
+        return .{ .tmp = tmp, .path = path };
+    }
+
+    fn deinit(self: *TmpHome, allocator: std.mem.Allocator) void {
+        config.home_dir_override = null;
+        allocator.free(self.path);
+        self.tmp.cleanup();
+    }
+};
+
+fn countSource(entries: []const ThemeEntry, name: []const u8, source: @TypeOf(@as(ThemeEntry, undefined).source)) usize {
+    var n: usize = 0;
+    for (entries) |e| {
+        if (e.source == source and std.mem.eql(u8, e.name, name)) n += 1;
+    }
+    return n;
+}
+
+test "sourceLabel names each source" {
+    const entry_user = ThemeEntry{ .name = "x", .source = .user };
+    const entry_builtin = ThemeEntry{ .name = "x", .source = .builtin };
+    try std.testing.expectEqualStrings("user", sourceLabel(entry_user.source));
+    try std.testing.expectEqualStrings("builtin", sourceLabel(entry_builtin.source));
+}
+
+test "collectThemeEntries lists every builtin when there are no user themes" {
+    const allocator = std.testing.allocator;
+    var home = try TmpHome.init(allocator);
+    defer home.deinit(allocator);
+
+    const entries = try collectThemeEntries(allocator);
+    defer freeThemeEntries(allocator, entries);
+
+    try std.testing.expectEqual(theme.builtin_themes.len, entries.len);
+    for (theme.builtin_themes, entries) |expected, got| {
+        try std.testing.expectEqualStrings(expected.name, got.name);
+        try std.testing.expect(got.source == .builtin);
+    }
+}
+
+test "collectThemeEntries puts user themes ahead of builtins" {
+    const allocator = std.testing.allocator;
+    var home = try TmpHome.init(allocator);
+    defer home.deinit(allocator);
+
+    const saved = try config.saveUserTheme(allocator, "Mine", theme.OneDarker, false);
+    allocator.free(saved);
+
+    const entries = try collectThemeEntries(allocator);
+    defer freeThemeEntries(allocator, entries);
+
+    try std.testing.expectEqual(theme.builtin_themes.len + 1, entries.len);
+    try std.testing.expectEqualStrings("Mine", entries[0].name);
+    try std.testing.expect(entries[0].source == .user);
+    for (entries[1..]) |e| try std.testing.expect(e.source == .builtin);
+}
+
+test "collectThemeEntries hides a builtin shadowed by a same-named user theme" {
+    const allocator = std.testing.allocator;
+    var home = try TmpHome.init(allocator);
+    defer home.deinit(allocator);
+
+    const saved = try config.saveUserTheme(allocator, "One Darker", theme.OneDarker, false);
+    allocator.free(saved);
+
+    const entries = try collectThemeEntries(allocator);
+    defer freeThemeEntries(allocator, entries);
+
+    try std.testing.expectEqual(theme.builtin_themes.len, entries.len);
+    try std.testing.expectEqual(@as(usize, 1), countSource(entries, "One Darker", .user));
+    try std.testing.expectEqual(@as(usize, 0), countSource(entries, "One Darker", .builtin));
+    // The other builtins are untouched.
+    try std.testing.expectEqual(@as(usize, 1), countSource(entries, "Paper White", .builtin));
+}
+
+test "activeThemeName follows the active preset" {
+    const allocator = std.testing.allocator;
+    var home = try TmpHome.init(allocator);
+    defer home.deinit(allocator);
+
+    const initial = (try activeThemeName(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(initial);
+    try std.testing.expectEqualStrings("One Darker", initial);
+
+    try config.Config.savePreset(allocator, .{
+        .name = "default",
+        .theme = "Paper White",
+        .font = "F",
+        .font_size = 10,
+        .window_controls = true,
+        .vertical_padding_px = 1,
+        .horizontal_padding_px = 1,
+        .include_drop_shadow = true,
+    });
+    const updated = (try activeThemeName(allocator)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(updated);
+    try std.testing.expectEqualStrings("Paper White", updated);
+}

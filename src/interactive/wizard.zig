@@ -456,3 +456,42 @@ test "computeScrollWindow never returns a zero-sized viewport on a tiny terminal
     const window = Wizard.computeScrollWindow(0, 100, 3, 0);
     try std.testing.expectEqual(@as(usize, 1), window.visible_count);
 }
+
+test "fontFamilyName strips known style suffixes" {
+    try std.testing.expectEqualStrings("Inter", fontFamilyName("Inter-Bold"));
+    try std.testing.expectEqualStrings("Inter", fontFamilyName("Inter-Italic"));
+    try std.testing.expectEqualStrings("Inter", fontFamilyName("Inter-Regular"));
+    try std.testing.expectEqualStrings("JetBrainsMono", fontFamilyName("JetBrainsMono-Bold"));
+}
+
+test "fontFamilyName strips BoldItalic as a whole, not just Italic" {
+    try std.testing.expectEqualStrings("Inter", fontFamilyName("Inter-BoldItalic"));
+}
+
+test "fontFamilyName ignores case in the suffix and keeps the family's case" {
+    try std.testing.expectEqualStrings("Inter", fontFamilyName("Inter-bold"));
+    try std.testing.expectEqualStrings("InTeR", fontFamilyName("InTeR-ITALIC"));
+}
+
+test "fontFamilyName leaves names without a known suffix alone" {
+    try std.testing.expectEqualStrings("Inter", fontFamilyName("Inter"));
+    try std.testing.expectEqualStrings("Inter-Light", fontFamilyName("Inter-Light"));
+    try std.testing.expectEqualStrings("Bold", fontFamilyName("Bold"));
+    try std.testing.expectEqualStrings("", fontFamilyName(""));
+}
+
+test "fontFamilyName never reduces a name to nothing" {
+    try std.testing.expectEqualStrings("-Bold", fontFamilyName("-Bold"));
+    try std.testing.expectEqualStrings("-Italic", fontFamilyName("-Italic"));
+}
+
+test "fontFamilyName strips only the last style suffix" {
+    try std.testing.expectEqualStrings("Inter-Bold", fontFamilyName("Inter-Bold-Italic"));
+}
+
+test "fontSourceLabel names every source" {
+    try std.testing.expectEqualStrings("bundled", fontSourceLabel(.bundled));
+    try std.testing.expectEqualStrings("user", fontSourceLabel(.user));
+    try std.testing.expectEqualStrings("your-dir", fontSourceLabel(.extra));
+    try std.testing.expectEqualStrings("system", fontSourceLabel(.system));
+}

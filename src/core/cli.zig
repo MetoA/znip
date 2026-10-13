@@ -55,13 +55,31 @@ pub const params = clap.parseParamsComptime(
     \\<str>                   The file path of the code that would be used
 );
 
+/// Parses the process's real command line. stdin counts as an input source
+/// whenever it isn't a TTY (i.e. something is piped in).
 pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     var diagnostic = clap.Diagnostic{};
-    var result = clap.parse(clap.Help, &params, clap.parsers.default, .{
+    var iter = try std.process.ArgIterator.initWithAllocator(allocator);
+    defer iter.deinit();
+    _ = iter.next(); // executable name
+
+    return parseFrom(allocator, &iter, !std.fs.File.stdin().isTty(), &diagnostic);
+}
+
+/// The testable core of `parse`: `iter` yields the arguments after the
+/// executable name, and `stdin_piped` says whether stdin carries code.
+/// Clap errors are reported to stderr through `diagnostic` when one is given.
+pub fn parseFrom(
+    allocator: std.mem.Allocator,
+    iter: anytype,
+    stdin_piped: bool,
+    diagnostic: ?*clap.Diagnostic,
+) !CLIConfig {
+    var result = clap.parseEx(clap.Help, &params, clap.parsers.default, iter, .{
         .allocator = allocator,
-        .diagnostic = &diagnostic,
+        .diagnostic = diagnostic,
     }) catch |err| {
-        diagnostic.reportToFile(.stderr(), err) catch {};
+        if (diagnostic) |d| d.reportToFile(.stderr(), err) catch {};
         return err;
     };
     defer result.deinit();
@@ -102,7 +120,7 @@ pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     errdefer if (output_name) |n| allocator.free(n);
 
     const from_clipboard = result.args.@"from-clipboard" != 0;
-    const from_stdin = !std.fs.File.stdin().isTty();
+    const from_stdin = stdin_piped;
 
     const source_count: u8 = @as(u8, @intFromBool(file_path != null)) +
         @as(u8, @intFromBool(from_clipboard)) +
@@ -191,4 +209,303 @@ pub fn parseHighlightSpec(allocator: std.mem.Allocator, spec: []const u8) ![]usi
 
 pub fn help() !void {
     return try clap.helpToFile(.stderr(), clap.Help, &params, .{});
+}
+
+fn parseArgsForTest(allocator: std.mem.Allocator, args: []const []const u8, stdin_piped: bool) !CLIConfig {
+    var iter = clap.args.SliceIterator{ .args = args };
+    return parseFrom(allocator, &iter, stdin_piped, null);
+}
+
+test "parseHighlightSpec parses a single line" {
+    const allocator = std.testing.allocator;
+    const lines = try parseHighlightSpec(allocator, "7");
+    defer allocator.free(lines);
+    try std.testing.expectEqualSlices(usize, &.{7}, lines);
+}
+
+test "parseHighlightSpec expands a range inclusively" {
+    const allocator = std.testing.allocator;
+    const lines = try parseHighlightSpec(allocator, "3-6");
+    defer allocator.free(lines);
+    try std.testing.expectEqualSlices(usize, &.{ 3, 4, 5, 6 }, lines);
+}
+
+test "parseHighlightSpec accepts a single-line range" {
+    const allocator = std.testing.allocator;
+    const lines = try parseHighlightSpec(allocator, "4-4");
+    defer allocator.free(lines);
+    try std.testing.expectEqualSlices(usize, &.{4}, lines);
+}
+
+test "parseHighlightSpec mixes lines and ranges" {
+    const allocator = std.testing.allocator;
+    const lines = try parseHighlightSpec(allocator, "5,8-10");
+    defer allocator.free(lines);
+    try std.testing.expectEqualSlices(usize, &.{ 5, 8, 9, 10 }, lines);
+}
+
+test "parseHighlightSpec sorts out-of-order segments" {
+    const allocator = std.testing.allocator;
+    const lines = try parseHighlightSpec(allocator, "9,2,5-6");
+    defer allocator.free(lines);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 5, 6, 9 }, lines);
+}
+
+test "parseHighlightSpec deduplicates repeated and overlapping lines" {
+    const allocator = std.testing.allocator;
+    const lines = try parseHighlightSpec(allocator, "1-3,2-4,3,3");
+    defer allocator.free(lines);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 2, 3, 4 }, lines);
+}
+
+test "parseHighlightSpec trims spaces and tabs around segments" {
+    const allocator = std.testing.allocator;
+    const lines = try parseHighlightSpec(allocator, " 2 ,\t4-5 ");
+    defer allocator.free(lines);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 4, 5 }, lines);
+}
+
+test "parseHighlightSpec rejects malformed specs" {
+    const allocator = std.testing.allocator;
+    const bad = [_][]const u8{
+        "", // empty
+        ",", // only separators
+        "5,", // trailing comma
+        ",5", // leading comma
+        "5,,6", // empty middle segment
+        "0", // lines are 1-based
+        "0-3", // range starts at zero
+        "3-0", // range ends at zero
+        "9-5", // reversed range
+        "1-", // open-ended range
+        "-3", // open-started range
+        "a", // not a number
+        "1-b", // range end not a number
+        "1.5", // not an integer
+        "-1", // negative
+        "1-2-3", // too many dashes
+        "1 2", // inner whitespace
+    };
+    for (bad) |spec| {
+        try std.testing.expectError(error.InvalidHighlightSpec, parseHighlightSpec(allocator, spec));
+    }
+}
+
+test "CLIConfig.deinit frees every owned field" {
+    const allocator = std.testing.allocator;
+    var config = CLIConfig{
+        .file_path = try allocator.dupe(u8, "a.zig"),
+        .preset = try allocator.dupe(u8, "p"),
+        .font = try allocator.dupe(u8, "f"),
+        .lang = try allocator.dupe(u8, "zig"),
+        .install_lang = try allocator.dupe(u8, "rust"),
+        .output_dir = try allocator.dupe(u8, "/tmp"),
+        .output_name = try allocator.dupe(u8, "out"),
+        .highlight_lines = try allocator.dupe(usize, &.{ 1, 2 }),
+    };
+    config.deinit(allocator);
+}
+
+test "CLIConfig.deinit tolerates an empty config" {
+    var config = CLIConfig{};
+    config.deinit(std.testing.allocator);
+}
+
+test "parseFrom reads a lone file path with defaults" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{"main.zig"}, false);
+    defer config.deinit(allocator);
+
+    try std.testing.expect(!config.help);
+    try std.testing.expectEqualStrings("main.zig", config.file_path.?);
+    try std.testing.expect(!config.from_clipboard);
+    try std.testing.expect(!config.from_stdin);
+    try std.testing.expect(!config.to_clipboard);
+    try std.testing.expect(!config.transparent);
+    try std.testing.expect(!config.open);
+    try std.testing.expect(!config.interactive);
+    try std.testing.expect(!config.yes);
+    try std.testing.expectEqual(@as(?usize, null), config.starting_line);
+    try std.testing.expectEqual(@as(?usize, null), config.ending_line);
+    try std.testing.expect(config.highlight_lines == null);
+    try std.testing.expect(config.preset == null);
+    try std.testing.expect(config.font == null);
+    try std.testing.expectEqual(@as(?u32, null), config.font_size);
+    try std.testing.expect(config.lang == null);
+    try std.testing.expect(config.output_name == null);
+}
+
+test "parseFrom reads every option" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{
+        "-s",           "2",
+        "-e",           "10",
+        "--highlight",  "3,5-6",
+        "--transparent",
+        "--to-clipboard",
+        "-o",
+        "-i",
+        "-p",           "mypreset",
+        "--font",       "Inter",
+        "--font-size",  "20",
+        "-n",           "out",
+        "--lang",       "rust",
+        "-y",
+        "main.rs",
+    }, false);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqualStrings("main.rs", config.file_path.?);
+    try std.testing.expectEqual(@as(?usize, 2), config.starting_line);
+    try std.testing.expectEqual(@as(?usize, 10), config.ending_line);
+    try std.testing.expectEqualSlices(usize, &.{ 3, 5, 6 }, config.highlight_lines.?);
+    try std.testing.expect(config.transparent);
+    try std.testing.expect(config.to_clipboard);
+    try std.testing.expect(config.open);
+    try std.testing.expect(config.interactive);
+    try std.testing.expectEqualStrings("mypreset", config.preset.?);
+    try std.testing.expectEqualStrings("Inter", config.font.?);
+    try std.testing.expectEqual(@as(?u32, 20), config.font_size);
+    try std.testing.expectEqualStrings("out", config.output_name.?);
+    try std.testing.expectEqualStrings("rust", config.lang.?);
+    try std.testing.expect(config.yes);
+}
+
+test "parseFrom accepts long forms of the short flags" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{
+        "--start", "1", "--end", "4", "--preset", "p", "--name", "n", "--open", "--interactive", "--yes", "f.c",
+    }, false);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?usize, 1), config.starting_line);
+    try std.testing.expectEqual(@as(?usize, 4), config.ending_line);
+    try std.testing.expectEqualStrings("p", config.preset.?);
+    try std.testing.expectEqualStrings("n", config.output_name.?);
+    try std.testing.expect(config.open and config.interactive and config.yes);
+}
+
+test "parseFrom --help returns early without needing input" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{"-h"}, false);
+    defer config.deinit(allocator);
+    try std.testing.expect(config.help);
+    try std.testing.expect(config.file_path == null);
+
+    var long = try parseArgsForTest(allocator, &.{"--help"}, false);
+    defer long.deinit(allocator);
+    try std.testing.expect(long.help);
+}
+
+test "parseFrom --help wins over otherwise-invalid input" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{ "--help", "-s", "0", "a.zig" }, true);
+    defer config.deinit(allocator);
+    try std.testing.expect(config.help);
+    try std.testing.expect(config.file_path == null);
+}
+
+test "parseFrom --install-lang returns early without needing input" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{ "--install-lang", "ruby" }, false);
+    defer config.deinit(allocator);
+    try std.testing.expectEqualStrings("ruby", config.install_lang.?);
+    try std.testing.expect(config.file_path == null);
+}
+
+test "parseFrom --output-dir returns early without needing input" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{ "--output-dir", "/tmp/images" }, false);
+    defer config.deinit(allocator);
+    try std.testing.expectEqualStrings("/tmp/images", config.output_dir.?);
+    try std.testing.expect(config.file_path == null);
+}
+
+test "parseFrom --install-lang takes precedence over --output-dir" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{ "--output-dir", "/tmp", "--install-lang", "go" }, false);
+    defer config.deinit(allocator);
+    try std.testing.expectEqualStrings("go", config.install_lang.?);
+    try std.testing.expect(config.output_dir == null);
+}
+
+test "parseFrom accepts clipboard as the sole input" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{"--from-clipboard"}, false);
+    defer config.deinit(allocator);
+    try std.testing.expect(config.from_clipboard);
+    try std.testing.expect(!config.from_stdin);
+    try std.testing.expect(config.file_path == null);
+}
+
+test "parseFrom accepts piped stdin as the sole input" {
+    const allocator = std.testing.allocator;
+    var config = try parseArgsForTest(allocator, &.{"--lang=python"}, true);
+    defer config.deinit(allocator);
+    try std.testing.expect(config.from_stdin);
+    try std.testing.expect(!config.from_clipboard);
+    try std.testing.expectEqualStrings("python", config.lang.?);
+}
+
+test "parseFrom requires an input source" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.NoInputProvided, parseArgsForTest(allocator, &.{}, false));
+    try std.testing.expectError(error.NoInputProvided, parseArgsForTest(allocator, &.{ "-s", "1", "--transparent" }, false));
+}
+
+test "parseFrom rejects more than one input source" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.MultipleCodeSourcesNotSupported, parseArgsForTest(allocator, &.{"a.zig"}, true));
+    try std.testing.expectError(error.MultipleCodeSourcesNotSupported, parseArgsForTest(allocator, &.{ "a.zig", "--from-clipboard" }, false));
+    try std.testing.expectError(error.MultipleCodeSourcesNotSupported, parseArgsForTest(allocator, &.{"--from-clipboard"}, true));
+    try std.testing.expectError(error.MultipleCodeSourcesNotSupported, parseArgsForTest(allocator, &.{ "a.zig", "--from-clipboard" }, true));
+}
+
+test "parseFrom rejects a zero start or end line" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidStartLine, parseArgsForTest(allocator, &.{ "-s", "0", "a.zig" }, false));
+    try std.testing.expectError(error.InvalidEndLine, parseArgsForTest(allocator, &.{ "-e", "0", "a.zig" }, false));
+    try std.testing.expectError(error.InvalidStartLine, parseArgsForTest(allocator, &.{ "-s", "0", "-e", "5", "a.zig" }, false));
+}
+
+test "parseFrom requires start to be strictly before end" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidStartEndLines, parseArgsForTest(allocator, &.{ "-s", "5", "-e", "5", "a.zig" }, false));
+    try std.testing.expectError(error.InvalidStartEndLines, parseArgsForTest(allocator, &.{ "-s", "6", "-e", "5", "a.zig" }, false));
+
+    var ok = try parseArgsForTest(allocator, &.{ "-s", "4", "-e", "5", "a.zig" }, false);
+    defer ok.deinit(allocator);
+    try std.testing.expectEqual(@as(?usize, 4), ok.starting_line);
+    try std.testing.expectEqual(@as(?usize, 5), ok.ending_line);
+}
+
+test "parseFrom accepts a start or end line on its own" {
+    const allocator = std.testing.allocator;
+    var only_start = try parseArgsForTest(allocator, &.{ "-s", "9", "a.zig" }, false);
+    defer only_start.deinit(allocator);
+    try std.testing.expectEqual(@as(?usize, 9), only_start.starting_line);
+    try std.testing.expectEqual(@as(?usize, null), only_start.ending_line);
+
+    var only_end = try parseArgsForTest(allocator, &.{ "-e", "9", "a.zig" }, false);
+    defer only_end.deinit(allocator);
+    try std.testing.expectEqual(@as(?usize, null), only_end.starting_line);
+    try std.testing.expectEqual(@as(?usize, 9), only_end.ending_line);
+}
+
+test "parseFrom propagates an invalid highlight spec without leaking" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidHighlightSpec, parseArgsForTest(allocator, &.{ "--highlight", "9-5", "-p", "x", "--font", "y", "--lang", "z", "-n", "w", "a.zig" }, false));
+}
+
+test "parseFrom does not leak when validation fails after allocating" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidStartLine, parseArgsForTest(allocator, &.{ "-s", "0", "-p", "x", "--font", "y", "--lang", "z", "-n", "w", "a.zig" }, false));
+}
+
+test "parseFrom surfaces clap errors for bad arguments" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidArgument, parseArgsForTest(allocator, &.{ "--no-such-flag", "a.zig" }, false));
+    try std.testing.expectError(error.MissingValue, parseArgsForTest(allocator, &.{ "a.zig", "-s" }, false));
+    try std.testing.expectError(error.InvalidCharacter, parseArgsForTest(allocator, &.{ "-s", "abc", "a.zig" }, false));
+    try std.testing.expectError(error.InvalidCharacter, parseArgsForTest(allocator, &.{ "-s", "-3", "a.zig" }, false));
 }
