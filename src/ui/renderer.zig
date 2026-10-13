@@ -8,8 +8,15 @@ const c = @cImport({
     @cInclude("blend2d/blend2d.h");
 });
 
-const code_window_min_width: f64 = 320.0;
-const code_window_max_width: f64 = 900.0;
+// Smallest window ever drawn; the header (controls + file name) may need more.
+const code_window_min_width: f64 = 120.0;
+// The window is capped by how many code columns fit, not by pixels, so the
+// cap follows --font-size.
+const code_window_max_columns: f64 = 120.0;
+const header_controls_extent: f64 = 71.0; // right edge of the last traffic light, from the window's left
+const header_file_name_x_with_controls: f64 = 90.0;
+const header_file_name_x_without_controls: f64 = 25.0;
+const header_right_margin: f64 = 25.0;
 const code_window_right_slack: f64 = 30.0; // matches the previous 700 vs 720 gap
 const code_window_gutter_width: f64 = 50.0; // matches the existing +50.0 in margin_x
 const code_window_radius: f64 = 12.0;
@@ -136,6 +143,29 @@ pub const Renderer = struct {
         return max_width;
     }
 
+    // The widest the window may grow: room for code_window_max_columns columns.
+    fn maxContentWidth(self: *Renderer, font_metrics: FontMetrics) f64 {
+        var text_metrics: c.BLTextMetrics = undefined;
+        self.calculateTextMetrics(&text_metrics, "0");
+        const column_advance: f64 = text_metrics.advance.x;
+        return code_window_gutter_width + code_window_max_columns * column_advance + code_window_right_slack + @as(f64, font_metrics.char_width);
+    }
+
+    // The narrowest the window may get: what the header (traffic lights and
+    // file name) needs, so short code doesn't leave empty space but the
+    // header is never clipped.
+    fn minContentWidth(self: *Renderer) f64 {
+        var needed: f64 = 0.0;
+        if (self.preset.window_controls) needed = header_controls_extent + header_right_margin;
+        if (self.display_file_name) |name| {
+            var text_metrics: c.BLTextMetrics = undefined;
+            self.calculateTextMetrics(&text_metrics, name);
+            const start_x = if (self.preset.window_controls) header_file_name_x_with_controls else header_file_name_x_without_controls;
+            needed = @max(needed, start_x + text_metrics.advance.x + header_right_margin);
+        }
+        return @max(needed, code_window_min_width);
+    }
+
     pub fn prepareDrawableChunks(self: *Renderer, tokens: []const tree_sitter.Token, starting_line: u32, highlight_lines: []const usize) !PreparedChunks {
         const font_metrics = self.fontMetrics();
         const pad_x = @as(f64, @floatFromInt(self.preset.horizontal_padding_px));
@@ -145,7 +175,8 @@ pub const Renderer = struct {
         // to every word (pen.x + advance + char_width > wrap_x), so a line that just
         // fits doesn't get pushed past the threshold by its own last word.
         const computed_width = code_window_gutter_width + raw_max_line_width + code_window_right_slack + @as(f64, font_metrics.char_width);
-        self.content_width = std.math.clamp(computed_width, code_window_min_width, code_window_max_width);
+        // The header minimum wins over the column cap, so a very long file name never overflows.
+        self.content_width = @max(self.minContentWidth(), @min(computed_width, self.maxContentWidth(font_metrics)));
         const wrap_x = pad_x + self.content_width - code_window_right_slack;
 
         var drawableChunks = std.ArrayList(DrawableChunk).empty;
@@ -911,7 +942,7 @@ test "prepareDrawableChunks of no tokens is just the first line number" {
     const prepared = try r.prepareDrawableChunks(&.{}, 1, &.{});
     try std.testing.expectEqual(@as(usize, 1), prepared.chunks.items.len);
     try std.testing.expectEqualStrings("  1", prepared.chunks.items[0].text);
-    try std.testing.expectEqual(code_window_min_width, r.content_width);
+    try std.testing.expectEqual(r.minContentWidth(), r.content_width);
 }
 
 test "prepareDrawableChunks starts numbering at the requested line" {
@@ -1006,21 +1037,82 @@ test "prepareDrawableChunks sizes the window to the widest line within the limit
     var r = try newRenderer(arena.allocator(), testPreset(), null);
     defer r.deinit();
 
-    // Short code: the minimum width.
+    // Short code: hugs the header minimum instead of a fixed 320px.
     _ = try r.prepareDrawableChunks(&.{tok("a", "x")}, 1, &.{});
-    try std.testing.expectEqual(code_window_min_width, r.content_width);
+    try std.testing.expectEqual(r.minContentWidth(), r.content_width);
 
     // A line in between is sized to fit: gutter + line + slack + one char.
     const medium = [_]Token{tok("x" ** 50, "x")};
     _ = try r.prepareDrawableChunks(&medium, 1, &.{});
     const expected = code_window_gutter_width + r.measureMaxLineWidth(&medium) + code_window_right_slack + @as(f64, r.fontMetrics().char_width);
-    try std.testing.expect(expected > code_window_min_width and expected < code_window_max_width);
+    try std.testing.expect(expected > r.minContentWidth() and expected < r.maxContentWidth(r.fontMetrics()));
     try std.testing.expectApproxEqAbs(expected, r.content_width, 1e-6);
 
     // A very long line: capped at the maximum width.
     const long = [_]Token{tok("x" ** 400, "x")};
     _ = try r.prepareDrawableChunks(&long, 1, &.{});
-    try std.testing.expectEqual(code_window_max_width, r.content_width);
+    try std.testing.expectEqual(r.maxContentWidth(r.fontMetrics()), r.content_width);
+}
+
+test "prepareDrawableChunks fits a 120 column line on one row but wraps 121" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r = try newRenderer(arena.allocator(), testPreset(), null);
+    defer r.deinit();
+
+    // Words, so the wrap check has places to break the line.
+    const full = "abcdefgh " ** 14 ++ "abcdefg"; // 126 + 7 = 133 chars
+    const fits = full[0..120];
+    const one_row = try r.prepareDrawableChunks(&.{tok(fits, "x")}, 1, &.{});
+    try std.testing.expectEqual(@as(usize, 0), countType(one_row.chunks.items, .wrap_indicator));
+    try std.testing.expectEqual(r.maxContentWidth(r.fontMetrics()), r.content_width);
+
+    const too_long = try r.prepareDrawableChunks(&.{tok(full, "x")}, 1, &.{});
+    try std.testing.expect(countType(too_long.chunks.items, .wrap_indicator) > 0);
+}
+
+test "the column cap scales with the font size" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var small = try newRenderer(arena.allocator(), testPreset(), null);
+    defer small.deinit();
+    var big_preset = testPreset();
+    big_preset.font_size = 32;
+    var big = try newRenderer(arena.allocator(), big_preset, null);
+    defer big.deinit();
+
+    const small_cap = small.maxContentWidth(small.fontMetrics());
+    const big_cap = big.maxContentWidth(big.fontMetrics());
+    try std.testing.expect(big_cap > small_cap * 1.8);
+
+    // Both still hold 120 columns on one row.
+    const line = [_]Token{tok("a" ** 120, "x")};
+    for ([_]*Renderer{ &small, &big }) |r| {
+        const prepared = try r.prepareDrawableChunks(&line, 1, &.{});
+        try std.testing.expectEqual(@as(usize, 0), countType(prepared.chunks.items, .wrap_indicator));
+    }
+}
+
+test "the minimum window width follows the header contents" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var bare_preset = testPreset();
+    bare_preset.window_controls = false;
+    var bare = try newRenderer(allocator, bare_preset, null);
+    defer bare.deinit();
+    try std.testing.expectEqual(code_window_min_width, bare.minContentWidth());
+
+    var named = try newRenderer(allocator, testPreset(), "a_rather_long_file_name_for_a_tiny_snippet.py");
+    defer named.deinit();
+    var named_short = try newRenderer(allocator, testPreset(), "a.py");
+    defer named_short.deinit();
+    try std.testing.expect(named.minContentWidth() > named_short.minContentWidth());
+
+    // The file name is never clipped, even if the code is far narrower.
+    _ = try named.prepareDrawableChunks(&.{tok("x", "x")}, 1, &.{});
+    try std.testing.expectEqual(named.minContentWidth(), named.content_width);
 }
 
 test "prepareDrawableChunks keeps every word of a line that fits" {
@@ -1048,7 +1140,7 @@ test "prepareDrawableChunks wraps an over-long line without renumbering it" {
     const chunks = prepared.chunks.items;
     const m = r.fontMetrics();
 
-    try std.testing.expectEqual(code_window_max_width, r.content_width);
+    try std.testing.expectEqual(r.maxContentWidth(m), r.content_width);
 
     const wraps = countType(chunks, .wrap_indicator);
     try std.testing.expect(wraps > 0);
@@ -1239,7 +1331,8 @@ test "the file name is only drawn when one is given" {
     defer named.deinit();
     try drawAll(&named, &.{tok("a", "x")}, 1, &.{});
 
-    try std.testing.expectEqual(imageWidth(&unnamed), imageWidth(&named));
+    // The window grows to hold the name, but never shrinks for it.
+    try std.testing.expect(imageWidth(&named) >= imageWidth(&unnamed));
     try std.testing.expect(!std.mem.eql(u8, try snapshot(allocator, &unnamed), try snapshot(allocator, &named)));
 }
 
@@ -1440,7 +1533,7 @@ test "prepareDrawableChunks never wraps a line the window was sized to fit" {
 
         const tokens = [_]Token{tok(buf[0..len], "x")};
         const prepared = try r.prepareDrawableChunks(&tokens, 1, &.{});
-        try std.testing.expect(r.content_width < code_window_max_width);
+        try std.testing.expect(r.content_width < r.maxContentWidth(r.fontMetrics()));
         if (countType(prepared.chunks.items, .wrap_indicator) != 0) {
             std.debug.print("line of {d} chars wrapped inside its own window\n", .{len});
             return error.TestUnexpectedResult;

@@ -210,8 +210,8 @@ fn renderToPng(
 
 test "renderImage writes a PNG for a source file" {
     const info = try renderToPng(std.testing.allocator, "const x: u32 = 5;\n", "main.zig", e2ePreset(), null, 1, &.{});
-    // Window is at least 320 wide, plus padding on both sides.
-    try std.testing.expect(info.width >= 320 + 60);
+    // Window holds the code and the header, plus padding on both sides.
+    try std.testing.expect(info.width >= 120 + 60);
     try std.testing.expect(info.height > 60);
 }
 
@@ -255,15 +255,33 @@ test "renderImage output grows taller with more lines" {
     try std.testing.expect(ten.height > one.height + 8 * 15);
 }
 
-test "renderImage caps the width of very long lines" {
-    const long_line = "x = \"" ++ "a" ** 1500 ++ "\"\n";
-    const info = try renderToPng(std.testing.allocator, long_line, "a.py", e2ePreset(), null, 1, &.{});
-    try std.testing.expectEqual(@as(u32, 900 + 2 * 30), info.width);
+test "renderImage caps very long lines at the same width and allows 120 columns" {
+    const long_a = "x = \"" ++ "a" ** 1500 ++ "\"\n";
+    const long_b = "x = \"" ++ "b" ** 3000 ++ "\"\n";
+    const exact_fit = "x = \"" ++ "a" ** 114 ++ "\"\n"; // 120 columns
+    const capped_a = try renderToPng(std.testing.allocator, long_a, "a.py", e2ePreset(), null, 1, &.{});
+    const capped_b = try renderToPng(std.testing.allocator, long_b, "a.py", e2ePreset(), null, 1, &.{});
+    const exact = try renderToPng(std.testing.allocator, exact_fit, "a.py", e2ePreset(), null, 1, &.{});
+    try std.testing.expectEqual(capped_a.width, capped_b.width);
+    // Wider than the old 900px window, and a 120 column line needs no wrapping, so no extra rows.
+    try std.testing.expect(capped_a.width > 900 + 2 * 30);
+    try std.testing.expectEqual(capped_a.width, exact.width);
+    try std.testing.expectEqual(exact.height, (try renderToPng(std.testing.allocator, "x = 1\n", "a.py", e2ePreset(), null, 1, &.{})).height);
 }
 
-test "renderImage sizes short code to the minimum window width" {
-    const info = try renderToPng(std.testing.allocator, "x\n", "a.py", e2ePreset(), null, 1, &.{});
-    try std.testing.expectEqual(@as(u32, 320 + 2 * 30), info.width);
+test "renderImage sizes short code to its content instead of a fixed minimum" {
+    const tiny = try renderToPng(std.testing.allocator, "x\n", "a.py", e2ePreset(), null, 1, &.{});
+    const short = try renderToPng(std.testing.allocator, "x = 1\n", "a.py", e2ePreset(), null, 1, &.{});
+    const longer = try renderToPng(std.testing.allocator, "x = 1 + 2 + 3 + 4\n", "a.py", e2ePreset(), null, 1, &.{});
+    try std.testing.expect(tiny.width < 320 + 2 * 30);
+    try std.testing.expect(short.width <= longer.width);
+    try std.testing.expect(longer.width > tiny.width);
+}
+
+test "renderImage widens the window for a long file name" {
+    const plain = try renderToPng(std.testing.allocator, "x\n", "a.py", e2ePreset(), null, 1, &.{});
+    const named = try renderToPng(std.testing.allocator, "x\n", "a_very_long_file_name_for_a_tiny_snippet.py", e2ePreset(), null, 1, &.{});
+    try std.testing.expect(named.width > plain.width);
 }
 
 test "renderImage respects the padding in the preset" {
