@@ -55,9 +55,13 @@ const ThemeEntry = struct {
     source: enum { user, builtin },
 };
 
-/// Merged, shadow-aware theme list: every user theme first, then every
-/// builtin not shadowed by a same-named user theme. Caller frees with
-/// `freeThemeEntries`.
+fn entryLessThan(_: void, a: ThemeEntry, b: ThemeEntry) bool {
+    return wizard.nameLessThan({}, a.name, b.name);
+}
+
+/// Merged, shadow-aware theme list: every user theme plus every builtin not
+/// shadowed by a same-named user theme, sorted alphabetically (ignoring case).
+/// Caller frees with `freeThemeEntries`.
 fn collectThemeEntries(allocator: std.mem.Allocator) ![]ThemeEntry {
     var entries = std.ArrayList(ThemeEntry).empty;
     errdefer {
@@ -84,6 +88,8 @@ fn collectThemeEntries(allocator: std.mem.Allocator) ![]ThemeEntry {
 
         try entries.append(allocator, .{ .name = try allocator.dupe(u8, t.name), .source = .builtin });
     }
+
+    std.mem.sort(ThemeEntry, entries.items, {}, entryLessThan);
 
     return entries.toOwnedSlice(allocator);
 }
@@ -383,27 +389,28 @@ test "collectThemeEntries lists every builtin when there are no user themes" {
     defer freeThemeEntries(allocator, entries);
 
     try std.testing.expectEqual(theme.builtin_themes.len, entries.len);
-    for (theme.builtin_themes, entries) |expected, got| {
-        try std.testing.expectEqualStrings(expected.name, got.name);
-        try std.testing.expect(got.source == .builtin);
+    for (entries) |e| {
+        try std.testing.expect(e.source == .builtin);
+        try std.testing.expect(theme.findBuiltin(e.name) != null);
     }
 }
 
-test "collectThemeEntries puts user themes ahead of builtins" {
+test "collectThemeEntries sorts alphabetically, ignoring case and source" {
     const allocator = std.testing.allocator;
     var home = try TmpHome.init(allocator);
     defer home.deinit(allocator);
 
-    const saved = try config.saveUserTheme(allocator, "Mine", theme.OneDarker, false);
+    const saved = try config.saveUserTheme(allocator, "mine", theme.OneDarker, false);
     allocator.free(saved);
 
     const entries = try collectThemeEntries(allocator);
     defer freeThemeEntries(allocator, entries);
 
     try std.testing.expectEqual(theme.builtin_themes.len + 1, entries.len);
-    try std.testing.expectEqualStrings("Mine", entries[0].name);
-    try std.testing.expect(entries[0].source == .user);
-    for (entries[1..]) |e| try std.testing.expect(e.source == .builtin);
+    try std.testing.expectEqual(@as(usize, 1), countSource(entries, "mine", .user));
+    for (entries[1..], 0..) |e, i| {
+        try std.testing.expect(!std.ascii.lessThanIgnoreCase(e.name, entries[i].name));
+    }
 }
 
 test "collectThemeEntries hides a builtin shadowed by a same-named user theme" {

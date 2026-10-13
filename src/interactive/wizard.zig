@@ -46,6 +46,24 @@ fn fontFamilyName(name: []const u8) []const u8 {
     return name;
 }
 
+/// Case-insensitive alphabetical ordering for picker labels, so "dracula"
+/// doesn't sort after "Tokyo Night" just because of its case.
+pub fn nameLessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.ascii.lessThanIgnoreCase(a, b);
+}
+
+fn familyLessThan(_: void, a: FontFamily, b: FontFamily) bool {
+    return nameLessThan({}, a.family_name, b.family_name);
+}
+
+const FontNameOrder = struct {
+    entries: []const fonts.FontEntry,
+
+    fn lessThan(self: FontNameOrder, a: usize, b: usize) bool {
+        return nameLessThan({}, self.entries[a].name, self.entries[b].name);
+    }
+};
+
 fn fontSourceLabel(source: fonts.FontSource) []const u8 {
     return switch (source) {
         .bundled => "bundled",
@@ -307,6 +325,7 @@ pub fn run(allocator: std.mem.Allocator) !Result {
     var theme_names = std.ArrayList([]const u8).empty;
     defer theme_names.deinit(allocator);
     for (znip.theme_module.builtin_themes) |t| try theme_names.append(allocator, t.name);
+    std.mem.sort([]const u8, theme_names.items, {}, nameLessThan);
 
     const theme_idx = try wiz.selectOne("Select a theme", theme_names.items);
     const theme_name = try allocator.dupe(u8, theme_names.items[theme_idx]);
@@ -335,6 +354,13 @@ pub fn run(allocator: std.mem.Allocator) !Result {
             try members.append(allocator, i);
             try families.append(allocator, .{ .family_name = family_name, .source = entry.source, .members = members });
         }
+    }
+
+    // Members index into `font_entries`, so sorting families and their styles
+    // doesn't invalidate anything.
+    std.mem.sort(FontFamily, families.items, {}, familyLessThan);
+    for (families.items) |*fam| {
+        std.mem.sort(usize, fam.members.items, FontNameOrder{ .entries = font_entries }, FontNameOrder.lessThan);
     }
 
     var family_labels = std.ArrayList([]const u8).empty;
