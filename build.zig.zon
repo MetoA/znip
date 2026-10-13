@@ -40,15 +40,35 @@
             .url = "https://github.com/rockorager/libvaxis/archive/81732720221779056739e5d7fca997c69fb8b751.tar.gz",
             .hash = "vaxis-0.5.1-BWNV_P47CQCCnpaMtUBVjAF_HGVOF0bDSVuf2wc76b7w",
         },
-        .wasmtime = .{
+        // wasmtime C API, one prebuilt archive per supported host; build.zig
+        // picks the one matching the target. Lazy, so only that one is
+        // fetched (and none with -Dwasm=false).
+        .wasmtime_aarch64_macos = .{
             .url = "https://github.com/bytecodealliance/wasmtime/releases/download/v36.0.7/wasmtime-v36.0.7-aarch64-macos-c-api.tar.xz",
             .hash = "N-V-__8AANOT3QIV5Ltus7D_GI_ULJH2Y2UdZVexyET1B_rf",
+            .lazy = true,
+        },
+        .wasmtime_x86_64_macos = .{
+            .url = "https://github.com/bytecodealliance/wasmtime/releases/download/v36.0.7/wasmtime-v36.0.7-x86_64-macos-c-api.tar.xz",
+            .hash = "N-V-__8AAOvnUwOFD1dzXV-6Oca9lme003B_txfKOZ-8vQbA",
+            .lazy = true,
+        },
+        .wasmtime_x86_64_linux = .{
+            .url = "https://github.com/bytecodealliance/wasmtime/releases/download/v36.0.7/wasmtime-v36.0.7-x86_64-linux-c-api.tar.xz",
+            .hash = "N-V-__8AAAVQmATDCgvg4vIZpMsmDddWQDxNwvehHk-hMzAk",
+            .lazy = true,
+        },
+        .wasmtime_aarch64_linux = .{
+            .url = "https://github.com/bytecodealliance/wasmtime/releases/download/v36.0.7/wasmtime-v36.0.7-aarch64-linux-c-api.tar.xz",
+            .hash = "N-V-__8AAK86GASyPddIjWJmrD3zqn5NRPsKjUhYC6BW1GzO",
+            .lazy = true,
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor",
         // For example...
         //"LICENSE",
         //"README.md",

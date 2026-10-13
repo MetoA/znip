@@ -61,7 +61,7 @@ pub fn renderImage(source_code: [:0]const u8, file_name: []const u8, source_hint
     defer prepared.chunks.deinit(arena_allocator);
     defer prepared.highlights.deinit(arena_allocator);
     const last_chunk_height: f64 = if (prepared.chunks.items.len > 0) prepared.chunks.getLast().y else 300.0;
-    renderer.initImage(last_chunk_height);
+    try renderer.initImage(last_chunk_height);
     renderer.fillBackground();
     try renderer.drawCodeWindow(last_chunk_height);
     renderer.drawHighlights(prepared.highlights.items);
@@ -134,6 +134,13 @@ fn maybeFetchDynamicLanguage(allocator: std.mem.Allocator, name: []const u8, aut
     };
 
     if (!auto_confirm) {
+        // With piped input stdin has already been consumed (or is empty), so
+        // the prompt could never be answered: say what to do instead of
+        // quietly treating it as "no".
+        if (!std.fs.File.stdin().isTty()) {
+            output.warn("Language '{s}' isn't built in. Re-run with -y to download its grammar.", .{name});
+            return;
+        }
         std.debug.print("Language '{s}' isn't built in - download WASM grammar? [y/N] ", .{name});
         if (!promptYesNo()) return;
     }
@@ -362,6 +369,7 @@ test "renderImage handles empty and whitespace-only input" {
 
 test {
     std.testing.refAllDecls(tree_sitter);
+    std.testing.refAllDecls(@import("core/mini_regex.zig"));
     std.testing.refAllDecls(grammar_cache);
     std.testing.refAllDecls(config);
     std.testing.refAllDecls(theme_module);

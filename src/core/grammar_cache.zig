@@ -25,9 +25,26 @@ pub fn fetchManifest(allocator: std.mem.Allocator, client: *std.http.Client, url
     const body = try fetchBody(allocator, client, url, 4 * 1024 * 1024);
     defer allocator.free(body);
 
-    return std.json.parseFromSlice(GrammarManifest, allocator, body, .{ .allocate = .alloc_always }) catch {
+    // Unknown fields are ignored so a manifest that grows new metadata keeps
+    // working with older clients.
+    return std.json.parseFromSlice(GrammarManifest, allocator, body, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch {
         return error.ManifestFetchFailed;
     };
+}
+
+/// Grammar names become directory names under ~/.znip/grammars and the
+/// `tree_sitter_<name>` symbol looked up in the wasm module, so anything that
+/// could escape that directory (or isn't a plausible identifier) is rejected.
+/// Names arrive from --lang, fenced code tags and the remote manifest.
+pub fn isValidGrammarName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    for (name) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-' or ch == '+')) return false;
+    }
+    return true;
 }
 
 // Looks up `name` in a parsed manifest, matching either the entry's
@@ -55,6 +72,9 @@ fn extensionMatches(extensions: []const []const u8, name: []const u8) bool {
 // digests, and writes them into ~/.znip/grammars/<entry.name>/ atomically
 // (write to a `.tmp` sibling file, then rename into place).
 pub fn fetchGrammar(allocator: std.mem.Allocator, client: *std.http.Client, entry: GrammarManifestEntry) !void {
+    // The name comes from a remote manifest; never let it choose the path.
+    if (!isValidGrammarName(entry.name)) return error.InvalidGrammarName;
+
     const wasm_bytes = try fetchBody(allocator, client, entry.wasm_url, 16 * 1024 * 1024);
     defer allocator.free(wasm_bytes);
     try verifySha256(wasm_bytes, entry.sha256_wasm);
@@ -73,9 +93,6 @@ pub fn fetchGrammar(allocator: std.mem.Allocator, client: *std.http.Client, entr
         else => return err,
     };
 
-    try writeFileAtomic(allocator, dir_path, "grammar.wasm", wasm_bytes);
-    try writeFileAtomic(allocator, dir_path, "highlights.scm", highlights_bytes);
-
     // A small sidecar recording this entry's extensions, so a later lookup
     // by a different alias (e.g. ".cbl" after this was cached via ".cob")
     // can find this same cache directory purely from disk, without needing
@@ -83,7 +100,23 @@ pub fn fetchGrammar(allocator: std.mem.Allocator, client: *std.http.Client, entr
     // extension-alias scan in tree_sitter.zig.
     const meta_json = try std.json.Stringify.valueAlloc(allocator, .{ .extensions = entry.extensions }, .{});
     defer allocator.free(meta_json);
-    try writeFileAtomic(allocator, dir_path, "meta.json", meta_json);
+
+    // Stage every file first and only then rename them into place, so a
+    // failed write can't leave a new grammar.wasm paired with an old
+    // highlights.scm.
+    var staged = [_]StagedFile{
+        .{ .name = "grammar.wasm", .bytes = wasm_bytes },
+        .{ .name = "highlights.scm", .bytes = highlights_bytes },
+        .{ .name = "meta.json", .bytes = meta_json },
+    };
+    var staged_count: usize = 0;
+    errdefer for (staged[0..staged_count]) |*f| f.discard(allocator);
+
+    for (&staged) |*f| {
+        try f.stage(allocator, dir_path);
+        staged_count += 1;
+    }
+    for (staged[0..staged_count]) |*f| try f.commit(allocator);
 }
 
 fn fetchBody(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, max_len: usize) ![]u8 {
@@ -111,21 +144,83 @@ fn verifySha256(bytes: []const u8, expected_hex: []const u8) !void {
     }
 }
 
+const StagedFile = struct {
+    name: []const u8,
+    bytes: []const u8,
+    dir_path: []const u8 = "",
+    tmp_path: ?[]u8 = null,
+
+    fn finalPath(self: StagedFile, allocator: std.mem.Allocator) ![]u8 {
+        return std.fs.path.join(allocator, &.{ self.dir_path, self.name });
+    }
+
+    // Writes the bytes to a uniquely named sibling temp file (unique so two
+    // concurrent znip runs can't interleave writes into the same inode).
+    fn stage(self: *StagedFile, allocator: std.mem.Allocator, dir_path: []const u8) !void {
+        self.dir_path = dir_path;
+        const tmp_name = try std.fmt.allocPrint(allocator, "{s}.{x}.tmp", .{ self.name, std.crypto.random.int(u64) });
+        defer allocator.free(tmp_name);
+        const tmp_path = try std.fs.path.join(allocator, &.{ dir_path, tmp_name });
+        errdefer allocator.free(tmp_path);
+
+        const file = try std.fs.createFileAbsolute(tmp_path, .{ .exclusive = true });
+        {
+            errdefer std.fs.deleteFileAbsolute(tmp_path) catch {};
+            defer file.close();
+            try file.writeAll(self.bytes);
+        }
+        self.tmp_path = tmp_path;
+    }
+
+    fn commit(self: *StagedFile, allocator: std.mem.Allocator) !void {
+        const tmp_path = self.tmp_path orelse return;
+        const final_path = try self.finalPath(allocator);
+        defer allocator.free(final_path);
+        try std.fs.renameAbsolute(tmp_path, final_path);
+        allocator.free(tmp_path);
+        self.tmp_path = null;
+    }
+
+    fn discard(self: *StagedFile, allocator: std.mem.Allocator) void {
+        const tmp_path = self.tmp_path orelse return;
+        std.fs.deleteFileAbsolute(tmp_path) catch {};
+        allocator.free(tmp_path);
+        self.tmp_path = null;
+    }
+};
+
 fn writeFileAtomic(allocator: std.mem.Allocator, dir_path: []const u8, file_name: []const u8, bytes: []const u8) !void {
-    const final_path = try std.fs.path.join(allocator, &.{ dir_path, file_name });
-    defer allocator.free(final_path);
+    var file = StagedFile{ .name = file_name, .bytes = bytes };
+    errdefer file.discard(allocator);
+    try file.stage(allocator, dir_path);
+    try file.commit(allocator);
+}
 
-    const tmp_name = try std.mem.concat(allocator, u8, &.{ file_name, ".tmp" });
-    defer allocator.free(tmp_name);
-    const tmp_path = try std.fs.path.join(allocator, &.{ dir_path, tmp_name });
-    defer allocator.free(tmp_path);
+test "isValidGrammarName accepts identifiers and rejects path-like names" {
+    try std.testing.expect(isValidGrammarName("cobol"));
+    try std.testing.expect(isValidGrammarName("c-sharp"));
+    try std.testing.expect(isValidGrammarName("c++"));
+    try std.testing.expect(!isValidGrammarName(""));
+    try std.testing.expect(!isValidGrammarName(".."));
+    try std.testing.expect(!isValidGrammarName("../../x"));
+    try std.testing.expect(!isValidGrammarName("a/b"));
+    try std.testing.expect(!isValidGrammarName("a\\b"));
+    try std.testing.expect(!isValidGrammarName("cobol\nMOVE"));
+    try std.testing.expect(!isValidGrammarName("a" ** 65));
+}
 
-    const file = try std.fs.createFileAbsolute(tmp_path, .{});
-    errdefer std.fs.deleteFileAbsolute(tmp_path) catch {};
-    try file.writeAll(bytes);
-    file.close();
-
-    try std.fs.renameAbsolute(tmp_path, final_path);
+test "fetchGrammar rejects a manifest entry whose name escapes the cache" {
+    var client = std.http.Client{ .allocator = std.testing.allocator };
+    defer client.deinit();
+    try std.testing.expectError(error.InvalidGrammarName, fetchGrammar(std.testing.allocator, &client, .{
+        .name = "../../evil",
+        .version = "1",
+        .wasm_url = "http://127.0.0.1:1/x.wasm",
+        .highlights_url = "http://127.0.0.1:1/x.scm",
+        .extensions = &.{},
+        .sha256_wasm = "aa",
+        .sha256_highlights = "bb",
+    }));
 }
 
 test "findEntry locates a listed language and misses an unlisted one" {
@@ -319,7 +414,11 @@ test "writeFileAtomic creates a file and leaves no temporary behind" {
     const content = try tmp.dir.readFileAlloc(allocator, "grammar.wasm", 1024);
     defer allocator.free(content);
     try std.testing.expectEqualStrings("\x00asm bytes", content);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("grammar.wasm.tmp", .{}));
+    // Only the final file remains: no staged temp files are left behind.
+    var count: usize = 0;
+    var it = tmp.dir.iterate();
+    while (try it.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 1), count);
 }
 
 test "writeFileAtomic replaces an existing file" {

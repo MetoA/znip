@@ -19,8 +19,11 @@ pub fn getLinesInRange(
     if (isBinary(content)) return error.BinaryFileNotSupported;
     
     if (starting_line == null and ending_line == null) {
-        defer allocator.free(content);
-        return allocator.dupeZ(u8, content);
+        // Not a `defer`: the errdefer above already frees `content` if the
+        // copy fails, and both running would be a double free.
+        const result = try allocator.dupeZ(u8, content);
+        allocator.free(content);
+        return result;
     }
     
     var lines = std.ArrayList([]const u8).empty;
@@ -55,6 +58,74 @@ pub fn readStdin(allocator: std.mem.Allocator) ![:0]u8 {
     if (content.len == 0) return error.EmptyFileNotSupported;
 
     return allocator.dupeZ(u8, content);
+}
+
+/// Tab stops used when expanding tabs (see `normalizeSource`).
+pub const tab_width = 4;
+
+/// Cleans up source text so the renderer only ever sees what it can draw and
+/// measure consistently: a leading UTF-8 byte order mark is dropped, CRLF and
+/// lone CR line endings become LF, tabs expand to the next `tab_width` column,
+/// invalid UTF-8 bytes become U+FFFD, and a single trailing newline is dropped
+/// (it terminates the last line instead of starting a blank, numbered one).
+/// Caller frees the result.
+pub fn normalizeSource(allocator: std.mem.Allocator, text: []const u8) ![:0]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, text.len);
+
+    var i: usize = 0;
+    if (std.mem.startsWith(u8, text, "\xEF\xBB\xBF")) i = 3;
+
+    var column: usize = 0;
+    while (i < text.len) {
+        const byte = text[i];
+        switch (byte) {
+            '\r' => {
+                i += if (i + 1 < text.len and text[i + 1] == '\n') 2 else 1;
+                try out.append(allocator, '\n');
+                column = 0;
+            },
+            '\n' => {
+                try out.append(allocator, '\n');
+                column = 0;
+                i += 1;
+            },
+            '\t' => {
+                const spaces = tab_width - (column % tab_width);
+                try out.appendNTimes(allocator, ' ', spaces);
+                column += spaces;
+                i += 1;
+            },
+            0...8, 11, 12, 14...31, 127 => {
+                // Other control characters have no glyph; drawing them shows
+                // a box (or nothing) and skews the column math.
+                i += 1;
+            },
+            0x80...0xFF => {
+                const len = std.unicode.utf8ByteSequenceLength(byte) catch 0;
+                if (len == 0 or i + len > text.len or !std.unicode.utf8ValidateSlice(text[i .. i + len])) {
+                    try out.appendSlice(allocator, "\xEF\xBF\xBD");
+                    i += 1;
+                } else {
+                    try out.appendSlice(allocator, text[i .. i + len]);
+                    i += len;
+                }
+                column += 1;
+            },
+            else => {
+                try out.append(allocator, byte);
+                column += 1;
+                i += 1;
+            },
+        }
+    }
+
+    // A final line terminator ends the last line rather than starting another
+    // (empty, numbered) one.
+    if (out.items.len > 0 and out.items[out.items.len - 1] == '\n') _ = out.pop();
+
+    return out.toOwnedSliceSentinel(allocator, 0);
 }
 
 // Null bytes indicate binary
@@ -448,4 +519,69 @@ test "uniqueOutputPath only splits the extension off the file name" {
     const expected = try tmpPath(allocator, &tmp, "dir.d/out (1)");
     defer allocator.free(expected);
     try std.testing.expectEqualStrings(expected, result);
+}
+
+test "normalizeSource leaves plain text alone" {
+    const allocator = std.testing.allocator;
+    const out = try normalizeSource(allocator, "fn main() void {\n    return;\n}");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("fn main() void {\n    return;\n}", out);
+}
+
+test "normalizeSource converts CRLF and lone CR to LF" {
+    const allocator = std.testing.allocator;
+    const out = try normalizeSource(allocator, "a\r\nb\rc\n\r\nd");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("a\nb\nc\n\nd", out);
+}
+
+test "normalizeSource drops exactly one trailing newline" {
+    const allocator = std.testing.allocator;
+    for ([_][2][]const u8{
+        .{ "a\n", "a" },
+        .{ "a\r\n", "a" },
+        .{ "a\n\n", "a\n" },
+        .{ "a\n\n\n", "a\n\n" },
+        .{ "\n", "" },
+        .{ "a", "a" },
+    }) |case| {
+        const out = try normalizeSource(allocator, case[0]);
+        defer allocator.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+}
+
+test "normalizeSource strips a leading BOM only" {
+    const allocator = std.testing.allocator;
+    const out = try normalizeSource(allocator, "\xEF\xBB\xBFlet x = 1;\xEF\xBB\xBF");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("let x = 1;\xEF\xBB\xBF", out);
+}
+
+test "normalizeSource expands tabs to the next tab stop" {
+    const allocator = std.testing.allocator;
+    const out = try normalizeSource(allocator, "\tx\n  \ty\nab\tc\n\t\tz");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("    x\n    y\nab  c\n        z", out);
+}
+
+test "normalizeSource counts a multibyte character as one column for tab stops" {
+    const allocator = std.testing.allocator;
+    const out = try normalizeSource(allocator, "é\tx");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("é   x", out);
+}
+
+test "normalizeSource replaces invalid UTF-8 and drops control characters" {
+    const allocator = std.testing.allocator;
+    const out = try normalizeSource(allocator, "a\xFFb\xC3(c\x01\x7Fd\xE2\x82");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("a\u{FFFD}b\u{FFFD}(cd\u{FFFD}\u{FFFD}", out);
+}
+
+test "normalizeSource handles empty input" {
+    const allocator = std.testing.allocator;
+    const out = try normalizeSource(allocator, "");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("", out);
 }

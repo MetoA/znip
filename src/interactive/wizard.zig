@@ -132,7 +132,12 @@ const Wizard = struct {
     }
 
     fn selectOne(self: *Wizard, title: []const u8, options: []const []const u8) !usize {
-        var idx: usize = 0;
+        return self.selectOneFrom(title, options, 0);
+    }
+
+    /// Like `selectOne`, with the cursor starting on `initial_idx`.
+    fn selectOneFrom(self: *Wizard, title: []const u8, options: []const []const u8, initial_idx: usize) !usize {
+        var idx: usize = @min(initial_idx, options.len -| 1);
         var scroll_offset: usize = 0;
         while (true) {
             const window = computeScrollWindow(idx, options.len, self.vx.window().height, scroll_offset);
@@ -205,8 +210,8 @@ const Wizard = struct {
 
     fn confirm(self: *Wizard, title: []const u8, default_yes: bool) !bool {
         const options = [_][]const u8{ "Yes", "No" };
-        const idx = try self.selectOne(title, &options);
-        _ = default_yes;
+        // The cursor starts on the default, so just pressing enter takes it.
+        const idx = try self.selectOneFrom(title, &options, if (default_yes) 0 else 1);
         return idx == 0;
     }
 
@@ -237,10 +242,11 @@ const Wizard = struct {
         }
     }
 
-    fn numberInput(self: *Wizard, title: []const u8, default: u32) !u32 {
+    fn numberInput(self: *Wizard, title: []const u8, default: u32, min: u32, max: u32) !u32 {
         var default_buf: [16]u8 = undefined;
         const default_str = try std.fmt.bufPrint(&default_buf, "{d}", .{default});
 
+        var message_buf: [64]u8 = undefined;
         var err_message: ?[]const u8 = null;
         while (true) {
             const raw = try self.textInput(title, default_str, err_message);
@@ -250,7 +256,8 @@ const Wizard = struct {
             if (trimmed.len == 0) return default;
 
             if (std.fmt.parseInt(u32, trimmed, 10)) |value| {
-                return value;
+                if (value >= min and value <= max) return value;
+                err_message = std.fmt.bufPrint(&message_buf, "Please enter a number from {d} to {d}.", .{ min, max }) catch "Number out of range.";
             } else |_| {
                 err_message = "Please enter a whole number.";
             }
@@ -394,11 +401,11 @@ pub fn run(allocator: std.mem.Allocator) !Result {
     };
     errdefer allocator.free(font_name);
 
-    const font_size = try wiz.numberInput("Font size (px)", 16);
+    const font_size = try wiz.numberInput("Font size (px)", 16, 1, Preset.max_font_size);
     const window_controls = try wiz.confirm("Show window controls?", true);
     const show_file_name = try wiz.confirm("Show file name (when reading from a file)?", true);
-    const vertical_padding_px = try wiz.numberInput("Vertical padding (px)", 50);
-    const horizontal_padding_px = try wiz.numberInput("Horizontal padding (px)", 50);
+    const vertical_padding_px = try wiz.numberInput("Vertical padding (px)", 50, 0, Preset.max_padding_px);
+    const horizontal_padding_px = try wiz.numberInput("Horizontal padding (px)", 50, 0, Preset.max_padding_px);
     const include_drop_shadow = try wiz.confirm("Include drop shadow?", true);
     const transparent_background = try wiz.confirm("Transparent background (canvas only, window stays opaque)?", false);
 
@@ -423,10 +430,24 @@ pub fn run(allocator: std.mem.Allocator) !Result {
     const save_choice = try wiz.selectOne("What would you like to do with this configuration?", &save_options);
 
     var preset_name: ?[]const u8 = null;
+    // Declared before the prompt so an error from anything below (including
+    // saving) frees the name too.
+    errdefer if (preset_name) |name| allocator.free(name);
     if (save_choice == 0) {
-        const name = try wiz.textInput("Preset name", null, null);
-        errdefer allocator.free(name);
-        preset_name = name;
+        var name_error: ?[]const u8 = null;
+        while (true) {
+            const raw = try wiz.textInput("Preset name", null, name_error);
+            defer allocator.free(raw);
+
+            // The name becomes a file name under ~/.znip/presets.
+            const trimmed = std.mem.trim(u8, raw, " \t");
+            if (!znip.config.isValidName(trimmed)) {
+                name_error = "Please enter a name without slashes (e.g. work).";
+                continue;
+            }
+            preset_name = try allocator.dupe(u8, trimmed);
+            break;
+        }
     }
 
     const preset = Preset{

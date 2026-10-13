@@ -67,8 +67,16 @@ pub fn build(b: *std.Build) !void {
     //
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
+    // Zig's self-hosted x86_64 ELF linker (the Debug default on Linux) can't
+    // resolve symbols out of the large Rust-built libwasmtime.a, and crashes
+    // when asked to hand off to LLD with its own backend, so use LLVM + LLD there.
+    const use_lld: ?bool = if (target.result.os.tag == .linux) true else null;
+    const use_llvm: ?bool = if (target.result.os.tag == .linux) true else null;
+
     const exe = b.addExecutable(.{
         .name = "znip",
+        .use_lld = use_lld,
+        .use_llvm = use_llvm,
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
@@ -114,9 +122,13 @@ pub fn build(b: *std.Build) !void {
         "-DASMJIT_STATIC",
         "-fno-math-errno",
     });
-    if (target.result.cpu.arch == .x86_64) {
-        try b2d_flags.append(b.allocator, "-msse4.2");
-        try b2d_flags.append(b.allocator, "-mavx2");
+    const is_x86_64 = target.result.cpu.arch == .x86_64;
+    if (is_x86_64) {
+        // These only *enable* the AVX2/SSE code paths. The instruction-set
+        // flags (-mavx2, ...) are applied per source file (see
+        // addSourceFilesFromDir): passing them globally defines __AVX2__
+        // everywhere, which makes Blend2D drop its runtime CPU dispatch and
+        // call the AVX2 code unconditionally - SIGILL on CPUs without AVX2.
         try b2d_flags.append(b.allocator, "-DBL_BUILD_OPT_AVX2");
         try b2d_flags.append(b.allocator, "-DBL_BUILD_OPT_SSE2");
     } else if (target.result.cpu.arch.isAARCH64()) {
@@ -125,9 +137,10 @@ pub fn build(b: *std.Build) !void {
     }
     mod.addIncludePath(b.path("vendor/blend2d"));
     mod.addIncludePath(b.path("vendor/blend2d/3rdparty/asmjit"));
-    addSourceFilesFromDir(b, mod, "vendor/blend2d/blend2d", b2d_flags.items);
-    addSourceFilesFromDir(b, mod, "vendor/blend2d/3rdparty/asmjit/asmjit", b2d_flags.items);
-    
+    addSourceFilesFromDir(b, mod, "vendor/blend2d/blend2d", b2d_flags.items, is_x86_64);
+    addSourceFilesFromDir(b, mod, "vendor/blend2d/3rdparty/asmjit/asmjit", b2d_flags.items, false);
+
+
     // Tree-sitter configuration
     //
     // All Tree-sitter/wasmtime sources and libraries are attached to `mod`
@@ -150,17 +163,34 @@ pub fn build(b: *std.Build) !void {
 
     if (wasm_enabled) {
         // wasmtime is a prebuilt binary (built from Rust; there is no C
-        // source path), vendored per-host-triple as a build.zig.zon
-        // dependency. This currently only vendors the developer's own host
-        // triple (see build.zig.zon) - cross-compiling to a target without a
-        // matching wasmtime release asset will fail to fetch that dependency.
-        const wasmtime_dep = b.dependency("wasmtime", .{});
-        mod.addIncludePath(wasmtime_dep.path("include"));
-        mod.addLibraryPath(wasmtime_dep.path("lib"));
-        // Prefer the static archive over the dylib: the dylib would only be
-        // locatable at runtime via an rpath into Zig's global package cache,
-        // which doesn't survive distributing the built binary elsewhere.
-        mod.linkSystemLibrary("wasmtime", .{ .preferred_link_mode = .static });
+        // source path), vendored per-host-triple as a lazy build.zig.zon
+        // dependency: only the one matching the target is ever fetched, and
+        // none is fetched with -Dwasm=false.
+        const wasmtime_name: []const u8 = switch (target.result.os.tag) {
+            .macos => switch (target.result.cpu.arch) {
+                .aarch64 => "wasmtime_aarch64_macos",
+                .x86_64 => "wasmtime_x86_64_macos",
+                else => unsupportedWasmTarget(),
+            },
+            .linux => switch (target.result.cpu.arch) {
+                .aarch64 => "wasmtime_aarch64_linux",
+                .x86_64 => "wasmtime_x86_64_linux",
+                else => unsupportedWasmTarget(),
+            },
+            else => unsupportedWasmTarget(),
+        };
+        // null on the first pass while the dependency is being fetched; the
+        // build runner then re-runs this function with it available.
+        if (b.lazyDependency(wasmtime_name, .{})) |wasmtime_dep| {
+            mod.addIncludePath(wasmtime_dep.path("include"));
+            mod.addLibraryPath(wasmtime_dep.path("lib"));
+            // Prefer the static archive over the dylib: the dylib would only be
+            // locatable at runtime via an rpath into Zig's global package cache,
+            // which doesn't survive distributing the built binary elsewhere.
+            // pkg-config is disabled so a system-wide wasmtime can't override
+            // the vendored one (and its headers) found above.
+            mod.linkSystemLibrary("wasmtime", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
+        }
         // wasm_store.c's `#include "./stdlib-symbols.txt"` is normally
         // satisfied by tree-sitter's Rust build.rs copying it into OUT_DIR;
         // here we just point the quoted-include fallback search at its real
@@ -199,7 +229,7 @@ pub fn build(b: *std.Build) !void {
         const src_dir = b.pathJoin(&.{ grammar_path, "src" });
         const parser_c = b.pathJoin(&.{ src_dir, "parser.c" });
 
-        if (std.fs.cwd().access(parser_c, .{})) |_| {
+        if (b.build_root.handle.access(parser_c, .{})) |_| {
             mod.addCSourceFile(.{
                 .file = b.path(parser_c),
                 .flags = &.{ "-I", src_dir, "-std=c11", "-O3" },
@@ -208,16 +238,18 @@ pub fn build(b: *std.Build) !void {
             const scanner_c = b.pathJoin(&.{ src_dir, "scanner.c" });
             const scanner_cc = b.pathJoin(&.{ src_dir, "scanner.cc" });
 
-            if (hasScanner(scanner_c)) {
+            if (hasScanner(b, scanner_c)) {
                 mod.addCSourceFile(.{ .file = b.path(scanner_c), .flags = &.{ "-I", src_dir, "-std=c11", "-O3" } });
             }
 
-            if (hasScanner(scanner_cc)) {
+            if (hasScanner(b, scanner_cc)) {
                 mod.addCSourceFile(.{ .file = b.path(scanner_cc), .flags = &.{ "-I", src_dir, "-O3" } });
                 mod.link_libcpp = true;
             }
         } else |err| {
-            std.log.err("Skipping {s}: parser.c not found in src/ ({s})", .{ language, @errorName(err) });
+            // Every language is referenced by the Zig sources, so skipping one
+            // would only turn into a confusing link error later.
+            std.debug.panic("tree-sitter grammar '{s}' is missing: {s} not found ({s}). Did you initialise the git submodules?", .{ language, parser_c, @errorName(err) });
         }
     }
 
@@ -258,6 +290,8 @@ pub fn build(b: *std.Build) !void {
     // set the releative field.
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .use_lld = use_lld,
+        .use_llvm = use_llvm,
     });
 
     // A run step that will run the test executable.
@@ -268,6 +302,8 @@ pub fn build(b: *std.Build) !void {
     // hence why we have to create two separate ones.
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
+        .use_lld = use_lld,
+        .use_llvm = use_llvm,
     });
 
     // A run step that will run the second test executable.
@@ -293,19 +329,55 @@ pub fn build(b: *std.Build) !void {
     // and reading its source code will allow you to master it.
 }
 
-fn hasScanner(scanner: []u8) bool {
-    _ = std.fs.cwd().access(scanner, .{}) catch return false;
+fn unsupportedWasmTarget() noreturn {
+    std.debug.panic("On-demand WASM grammars (-Dwasm=true, the default) need a wasmtime build for macOS or Linux on x86_64/aarch64. Pass -Dwasm=false for other targets.", .{});
+}
+
+fn hasScanner(b: *std.Build, scanner: []const u8) bool {
+    _ = b.build_root.handle.access(scanner, .{}) catch return false;
     return true;
 }
 
-fn addSourceFilesFromDir(b: *std.Build, mod: *std.Build.Module, dir_path: []const u8, cpp_flags: []const []const u8) void {
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+/// Compiler flags enabling the instruction set a Blend2D source file needs,
+/// going by its `_<isa>` file-name suffix (e.g. `otglyf_avx2.cpp`). Applied per
+/// file so the rest of the library stays baseline x86_64 and keeps its runtime
+/// dispatch.
+///
+/// These are cc1 `-target-feature` flags rather than `-mavx2`: Zig already
+/// passes `-target-feature -avx2` (etc.) for the target's CPU, and a driver-level
+/// `-m` flag loses to it, leaving `__AVX2__` undefined and the file empty.
+fn x86IsaFlags(file_name: []const u8) []const []const u8 {
+    const stem = file_name[0 .. std.mem.lastIndexOfScalar(u8, file_name, '.') orelse file_name.len];
+    const x = "-Xclang";
+    const tf = "-target-feature";
+    if (std.mem.endsWith(u8, stem, "_avx2")) return &.{
+        x, tf, x, "+avx2", x, tf, x, "+avx", x, tf, x, "+sse4.2", x, tf, x, "+sse4.1", x, tf, x, "+ssse3", x, tf, x, "+popcnt",
+    };
+    if (std.mem.endsWith(u8, stem, "_avx")) return &.{
+        x, tf, x, "+avx", x, tf, x, "+sse4.2", x, tf, x, "+sse4.1", x, tf, x, "+ssse3", x, tf, x, "+popcnt",
+    };
+    if (std.mem.endsWith(u8, stem, "_sse4_2")) return &.{
+        x, tf, x, "+sse4.2", x, tf, x, "+sse4.1", x, tf, x, "+ssse3", x, tf, x, "+popcnt", x, tf, x, "+pclmul",
+    };
+    if (std.mem.endsWith(u8, stem, "_sse4_1")) return &.{
+        x, tf, x, "+sse4.1", x, tf, x, "+ssse3",
+    };
+    if (std.mem.endsWith(u8, stem, "_ssse3")) return &.{
+        x, tf, x, "+ssse3",
+    };
+    return &.{};
+}
+
+fn addSourceFilesFromDir(b: *std.Build, mod: *std.Build.Module, dir_path: []const u8, cpp_flags: []const []const u8, per_file_x86_isa: bool) void {
+    var dir = b.build_root.handle.openDir(dir_path, .{ .iterate = true }) catch |err| {
+        std.debug.panic("'{s}' couldn't be opened ({s}). Did you initialise the git submodules?", .{ dir_path, @errorName(err) });
+    };
     defer dir.close();
 
-    var walker = dir.walk(b.allocator) catch return;
+    var walker = dir.walk(b.allocator) catch @panic("OOM");
     defer walker.deinit();
 
-    while (walker.next() catch null) |entry| {
+    while (walker.next() catch |err| std.debug.panic("couldn't scan '{s}': {s}", .{ dir_path, @errorName(err) })) |entry| {
         const name = entry.basename;
         const path = entry.path;
 
@@ -318,7 +390,18 @@ fn addSourceFilesFromDir(b: *std.Build, mod: *std.Build.Module, dir_path: []cons
             std.mem.containsAtLeast(u8, path, 1, "demo") or
             std.mem.containsAtLeast(u8, path, 1, "sample")) continue;
 
+        var flags = cpp_flags;
+        if (per_file_x86_isa) {
+            const isa_flags = x86IsaFlags(name);
+            if (isa_flags.len > 0) {
+                const with_isa = b.allocator.alloc([]const u8, cpp_flags.len + isa_flags.len) catch @panic("OOM");
+                @memcpy(with_isa[0..cpp_flags.len], cpp_flags);
+                @memcpy(with_isa[cpp_flags.len..], isa_flags);
+                flags = with_isa;
+            }
+        }
+
         const full_path = b.pathJoin(&.{ dir_path, path });
-        mod.addCSourceFile(.{ .file = b.path(full_path), .flags = cpp_flags });
+        mod.addCSourceFile(.{ .file = b.path(full_path), .flags = flags });
     }
 }

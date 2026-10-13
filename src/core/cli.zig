@@ -34,6 +34,14 @@ pub const CLIConfig = struct {
     }
 };
 
+/// Largest line number accepted for -s/-e/--highlight.
+pub const max_line_number: usize = std.math.maxInt(u32);
+/// Most lines a single --highlight spec may expand to. Far above what fits in
+/// an image (Blend2D caps images at 65535px), but keeps `1-4000000000` from
+/// allocating gigabytes.
+pub const max_highlight_lines: usize = 100_000;
+pub const max_font_size: u32 = 512;
+
 pub const params = clap.parseParamsComptime(
     \\-h, --help              Displays help and exits
     \\-s, --start <usize>     Specifies starting line of the file
@@ -55,8 +63,11 @@ pub const params = clap.parseParamsComptime(
     \\<str>                   The file path of the code that would be used
 );
 
-/// Parses the process's real command line. stdin counts as an input source
-/// whenever it isn't a TTY (i.e. something is piped in).
+/// Parses the process's real command line. stdin is the input source only when
+/// it isn't a TTY (i.e. something is piped in) and no file path or
+/// --from-clipboard was given: an explicit source always wins, so `znip f.zig`
+/// still works from cron, CI, git hooks and `ssh host znip f.zig`, where stdin
+/// is never a terminal.
 pub fn parse(allocator: std.mem.Allocator) !CLIConfig {
     var diagnostic = clap.Diagnostic{};
     var iter = try std.process.ArgIterator.initWithAllocator(allocator);
@@ -120,7 +131,7 @@ pub fn parseFrom(
     errdefer if (output_name) |n| allocator.free(n);
 
     const from_clipboard = result.args.@"from-clipboard" != 0;
-    const from_stdin = stdin_piped;
+    const from_stdin = stdin_piped and file_path == null and !from_clipboard;
 
     const source_count: u8 = @as(u8, @intFromBool(file_path != null)) +
         @as(u8, @intFromBool(from_clipboard)) +
@@ -133,6 +144,12 @@ pub fn parseFrom(
     const end: ?usize = result.args.end;
     if (start) |s| if (s == 0) return error.InvalidStartLine;
     if (end) |e| if (e == 0) return error.InvalidEndLine;
+    // Line numbers are carried around as u32 later on.
+    if (start) |s| if (s > max_line_number) return error.LineNumberTooLarge;
+    if (end) |e| if (e > max_line_number) return error.LineNumberTooLarge;
+
+    const font_size: ?u32 = result.args.@"font-size";
+    if (font_size) |size| if (size == 0 or size > max_font_size) return error.InvalidFontSize;
     if (start) |s| {
         if (end) |e| {
             if (s >= e) return error.InvalidStartEndLines;
@@ -157,7 +174,7 @@ pub fn parseFrom(
         .interactive = result.args.interactive != 0,
         .preset = preset,
         .font = font,
-        .font_size = result.args.@"font-size",
+        .font_size = font_size,
         .lang = lang,
         .output_name = output_name,
         .yes = result.args.yes != 0,
@@ -181,6 +198,8 @@ pub fn parseHighlightSpec(allocator: std.mem.Allocator, spec: []const u8) ![]usi
             const range_start = std.fmt.parseUnsigned(usize, start_str, 10) catch return error.InvalidHighlightSpec;
             const range_end = std.fmt.parseUnsigned(usize, end_str, 10) catch return error.InvalidHighlightSpec;
             if (range_start == 0 or range_end == 0 or range_end < range_start) return error.InvalidHighlightSpec;
+            if (range_end > max_line_number) return error.LineNumberTooLarge;
+            if (range_end - range_start >= max_highlight_lines - @min(lines.items.len, max_highlight_lines)) return error.HighlightRangeTooLarge;
 
             var line = range_start;
             while (line <= range_end) : (line += 1) {
@@ -189,6 +208,8 @@ pub fn parseHighlightSpec(allocator: std.mem.Allocator, spec: []const u8) ![]usi
         } else {
             const line = std.fmt.parseUnsigned(usize, segment, 10) catch return error.InvalidHighlightSpec;
             if (line == 0) return error.InvalidHighlightSpec;
+            if (line > max_line_number) return error.LineNumberTooLarge;
+            if (lines.items.len >= max_highlight_lines) return error.HighlightRangeTooLarge;
             try lines.append(allocator, line);
         }
     }
@@ -208,7 +229,7 @@ pub fn parseHighlightSpec(allocator: std.mem.Allocator, spec: []const u8) ![]usi
 }
 
 pub fn help() !void {
-    return try clap.helpToFile(.stderr(), clap.Help, &params, .{});
+    return try clap.helpToFile(.stdout(), clap.Help, &params, .{});
 }
 
 fn parseArgsForTest(allocator: std.mem.Allocator, args: []const []const u8, stdin_piped: bool) !CLIConfig {
@@ -453,12 +474,47 @@ test "parseFrom requires an input source" {
     try std.testing.expectError(error.NoInputProvided, parseArgsForTest(allocator, &.{ "-s", "1", "--transparent" }, false));
 }
 
-test "parseFrom rejects more than one input source" {
+test "parseFrom rejects more than one explicit input source" {
     const allocator = std.testing.allocator;
-    try std.testing.expectError(error.MultipleCodeSourcesNotSupported, parseArgsForTest(allocator, &.{"a.zig"}, true));
     try std.testing.expectError(error.MultipleCodeSourcesNotSupported, parseArgsForTest(allocator, &.{ "a.zig", "--from-clipboard" }, false));
-    try std.testing.expectError(error.MultipleCodeSourcesNotSupported, parseArgsForTest(allocator, &.{"--from-clipboard"}, true));
     try std.testing.expectError(error.MultipleCodeSourcesNotSupported, parseArgsForTest(allocator, &.{ "a.zig", "--from-clipboard" }, true));
+}
+
+test "parseFrom lets an explicit file or clipboard win over non-TTY stdin" {
+    const allocator = std.testing.allocator;
+
+    // cron / CI / ssh: stdin isn't a terminal but a file was named.
+    var file = try parseArgsForTest(allocator, &.{"a.zig"}, true);
+    defer file.deinit(allocator);
+    try std.testing.expect(!file.from_stdin);
+    try std.testing.expectEqualStrings("a.zig", file.file_path.?);
+
+    var clip = try parseArgsForTest(allocator, &.{"--from-clipboard"}, true);
+    defer clip.deinit(allocator);
+    try std.testing.expect(!clip.from_stdin);
+    try std.testing.expect(clip.from_clipboard);
+}
+
+test "parseFrom rejects out-of-range numbers instead of panicking later" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.LineNumberTooLarge, parseArgsForTest(allocator, &.{ "-s", "5000000000", "a.zig" }, false));
+    try std.testing.expectError(error.LineNumberTooLarge, parseArgsForTest(allocator, &.{ "-e", "5000000000", "a.zig" }, false));
+    try std.testing.expectError(error.InvalidFontSize, parseArgsForTest(allocator, &.{ "--font-size", "0", "a.zig" }, false));
+    try std.testing.expectError(error.InvalidFontSize, parseArgsForTest(allocator, &.{ "--font-size", "4000000000", "a.zig" }, false));
+    var ok = try parseArgsForTest(allocator, &.{ "--font-size", "512", "a.zig" }, false);
+    defer ok.deinit(allocator);
+    try std.testing.expectEqual(@as(?u32, 512), ok.font_size);
+}
+
+test "parseHighlightSpec caps huge ranges and line numbers" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.HighlightRangeTooLarge, parseHighlightSpec(allocator, "1-99999999"));
+    try std.testing.expectError(error.LineNumberTooLarge, parseHighlightSpec(allocator, "1-18446744073709551615"));
+    try std.testing.expectError(error.LineNumberTooLarge, parseHighlightSpec(allocator, "99999999999"));
+    try std.testing.expectError(error.HighlightRangeTooLarge, parseHighlightSpec(allocator, "1-60000,70000-130000"));
+    const ok = try parseHighlightSpec(allocator, "1-99999");
+    defer allocator.free(ok);
+    try std.testing.expectEqual(@as(usize, 99999), ok.len);
 }
 
 test "parseFrom rejects a zero start or end line" {

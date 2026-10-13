@@ -17,27 +17,43 @@ const usage =
     \\
 ;
 
-pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+/// Runs `znip theme ...` and returns the process exit code.
+pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !u8 {
     if (args.len == 0) {
         std.debug.print("{s}", .{usage});
-        return;
+        return 0;
     }
 
     const verb = args[0];
-    if (std.mem.eql(u8, verb, "list")) {
-        try runList(allocator);
-    } else if (std.mem.eql(u8, verb, "show")) {
-        try runShow(allocator, args[1..]);
-    } else if (std.mem.eql(u8, verb, "use")) {
-        try runUse(allocator, args[1..]);
-    } else if (std.mem.eql(u8, verb, "create")) {
-        try runCreate(allocator, args[1..]);
-    } else if (std.mem.eql(u8, verb, "-h") or std.mem.eql(u8, verb, "--help")) {
+    // `znip theme list | head` closes the pipe early; that's not a failure.
+    const code = (if (std.mem.eql(u8, verb, "list"))
+        runList(allocator)
+    else if (std.mem.eql(u8, verb, "show"))
+        runShow(allocator, args[1..])
+    else if (std.mem.eql(u8, verb, "use"))
+        runUse(allocator, args[1..])
+    else if (std.mem.eql(u8, verb, "create"))
+        runCreate(allocator, args[1..])
+    else if (std.mem.eql(u8, verb, "-h") or std.mem.eql(u8, verb, "--help")) blk: {
         std.debug.print("{s}", .{usage});
-    } else {
+        break :blk @as(anyerror!u8, 0);
+    } else blk: {
         output.err("Unknown 'theme' command '{s}'.", .{verb});
         std.debug.print("{s}", .{usage});
-    }
+        break :blk @as(anyerror!u8, 1);
+    }) catch |err| switch (err) {
+        error.BrokenPipe => return 0,
+        else => return err,
+    };
+    return code;
+}
+
+/// Formats into an allocated buffer and writes it to `file`, so long names
+/// can't overflow a fixed-size buffer.
+fn writeFmt(allocator: std.mem.Allocator, file: std.fs.File, comptime fmt: []const u8, args: anytype) !void {
+    const text = try std.fmt.allocPrint(allocator, fmt, args);
+    defer allocator.free(text);
+    try file.writeAll(text);
 }
 
 fn activeThemeName(allocator: std.mem.Allocator) !?[]const u8 {
@@ -106,22 +122,23 @@ fn sourceLabel(source: anytype) []const u8 {
     };
 }
 
-/// Opens the interactive up/down picker over every available theme, or
-/// prints a message and returns null if the user cancels (ctrl+c/esc) or an
-/// error already got reported. Returned name is allocator-owned.
+/// Opens the interactive up/down picker over every available theme. Returns
+/// null if the user cancels (ctrl+c/esc), and error.PickerFailed (after
+/// reporting it) if listing or the picker itself failed. Returned name is
+/// allocator-owned.
 fn pickThemeName(allocator: std.mem.Allocator, title: []const u8) !?[]const u8 {
     const active_name = activeThemeName(allocator) catch null;
     defer if (active_name) |n| allocator.free(n);
 
     const entries = collectThemeEntries(allocator) catch |err| {
         output.err("Couldn't list themes: {s}", .{@errorName(err)});
-        return null;
+        return error.PickerFailed;
     };
     defer freeThemeEntries(allocator, entries);
 
     if (entries.len == 0) {
         output.err("No themes available.", .{});
-        return null;
+        return error.PickerFailed;
     }
 
     var labels = std.ArrayList([]const u8).empty;
@@ -141,30 +158,29 @@ fn pickThemeName(allocator: std.mem.Allocator, title: []const u8) !?[]const u8 {
         },
         else => {
             output.err("The interactive picker failed: {s}", .{@errorName(err)});
-            return null;
+            return error.PickerFailed;
         },
     };
 
     return try allocator.dupe(u8, entries[idx].name);
 }
 
-fn runList(allocator: std.mem.Allocator) !void {
+fn runList(allocator: std.mem.Allocator) !u8 {
     const active_name = activeThemeName(allocator) catch null;
     defer if (active_name) |n| allocator.free(n);
 
     const entries = collectThemeEntries(allocator) catch |err| {
         output.err("Couldn't list themes: {s}", .{@errorName(err)});
-        return;
+        return 1;
     };
     defer freeThemeEntries(allocator, entries);
 
     const stdout = std.fs.File.stdout();
     for (entries) |e| {
         const active_suffix: []const u8 = if (active_name != null and std.mem.eql(u8, active_name.?, e.name)) " (active)" else "";
-        var buf: [512]u8 = undefined;
-        const line = try std.fmt.bufPrint(&buf, "[{s}] {s}{s}\n", .{ sourceLabel(e.source), e.name, active_suffix });
-        try stdout.writeAll(line);
+        try writeFmt(allocator, stdout, "[{s}] {s}{s}\n", .{ sourceLabel(e.source), e.name, active_suffix });
     }
+    return 0;
 }
 
 fn resolveOrReport(allocator: std.mem.Allocator, name: []const u8) !?theme.ThemeHandle {
@@ -200,28 +216,27 @@ fn printColorField(stdout: std.fs.File, name: []const u8, argb: u32, swatches: b
     try stdout.writeAll(line);
 }
 
-fn runShow(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+fn runShow(allocator: std.mem.Allocator, args: [][:0]u8) !u8 {
     var owned_name: ?[]const u8 = null;
     defer if (owned_name) |n| allocator.free(n);
 
     const name: []const u8 = if (args.len > 0) args[0] else blk: {
         if (!std.fs.File.stdin().isTty()) {
             output.err("Usage: znip theme show <name>", .{});
-            return;
+            return 1;
         }
-        owned_name = (try pickThemeName(allocator, "Select a theme to show")) orelse return;
+        owned_name = (pickThemeName(allocator, "Select a theme to show") catch return 1) orelse return 0;
         break :blk owned_name.?;
     };
 
-    var handle = (try resolveOrReport(allocator, name)) orelse return;
+    var handle = (try resolveOrReport(allocator, name)) orelse return 1;
     defer handle.deinit();
 
     const stdout = std.fs.File.stdout();
     const swatches = stdoutIsTty();
     const t = handle.value();
 
-    var name_buf: [512]u8 = undefined;
-    try stdout.writeAll(try std.fmt.bufPrint(&name_buf, "name: {s}\n", .{t.name}));
+    try writeFmt(allocator, stdout, "name: {s}\n", .{t.name});
 
     switch (handle) {
         .static => try stdout.writeAll("source: builtin\n"),
@@ -229,8 +244,7 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             const path = config.userThemePath(allocator, name) catch null;
             defer if (path) |p| allocator.free(p);
             if (path) |p| {
-                var buf: [1024]u8 = undefined;
-                try stdout.writeAll(try std.fmt.bufPrint(&buf, "source: user ({s})\n", .{p}));
+                try writeFmt(allocator, stdout, "source: user ({s})\n", .{p});
             } else {
                 try stdout.writeAll("source: user\n");
             }
@@ -254,52 +268,60 @@ fn runShow(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             else => try printColorField(stdout, field.name, value, swatches),
         }
     }
+    return 0;
 }
 
-fn runUse(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+fn runUse(allocator: std.mem.Allocator, args: [][:0]u8) !u8 {
     var owned_name: ?[]const u8 = null;
     defer if (owned_name) |n| allocator.free(n);
 
     const name: []const u8 = if (args.len > 0) args[0] else blk: {
         if (!std.fs.File.stdin().isTty()) {
             output.err("Usage: znip theme use <name>", .{});
-            return;
+            return 1;
         }
-        owned_name = (try pickThemeName(allocator, "Select a theme to use")) orelse return;
+        owned_name = (pickThemeName(allocator, "Select a theme to use") catch return 1) orelse return 0;
         break :blk owned_name.?;
     };
 
-    var handle = (try resolveOrReport(allocator, name)) orelse return;
+    var handle = (try resolveOrReport(allocator, name)) orelse return 1;
     handle.deinit();
 
     var cfg = config.Config.load(allocator) catch |err| {
         output.err("Couldn't load your configuration: {s}", .{@errorName(err)});
-        return;
+        return 1;
     };
     defer cfg.deinit();
 
     var preset = config.Config.loadPreset(allocator, cfg.value.active_preset) catch |err| {
         output.err("Couldn't load preset '{s}': {s}", .{ cfg.value.active_preset, @errorName(err) });
-        return;
+        return 1;
     };
     defer preset.deinit();
 
     preset.value.theme = name;
 
-    config.Config.savePreset(allocator, preset.value) catch |err| {
-        output.err("Couldn't save preset '{s}': {s}", .{ preset.value.name orelse "?", @errorName(err) });
-        return;
+    // Write back to the file the preset was loaded from, not to whatever its
+    // `name` field claims.
+    config.Config.savePresetAs(allocator, cfg.value.active_preset, preset.value) catch |err| {
+        output.err("Couldn't save preset '{s}': {s}", .{ cfg.value.active_preset, @errorName(err) });
+        return 1;
     };
 
-    output.ok("'{s}' now uses the '{s}' theme.", .{ preset.value.name orelse "?", name });
+    output.ok("'{s}' now uses the '{s}' theme.", .{ cfg.value.active_preset, name });
+    return 0;
 }
 
-fn runCreate(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+fn runCreate(allocator: std.mem.Allocator, args: [][:0]u8) !u8 {
     if (args.len == 0) {
         output.err("Usage: znip theme create <name> [--from <name>] [--force]", .{});
-        return;
+        return 1;
     }
     const name = args[0];
+    if (!config.isValidName(name) or std.mem.startsWith(u8, name, "-")) {
+        output.err("'{s}' isn't a valid theme name.", .{name});
+        return 1;
+    }
 
     var from_name: []const u8 = "One Darker";
     var force = false;
@@ -313,16 +335,16 @@ fn runCreate(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             i += 1;
             if (i >= args.len) {
                 output.err("--from requires a theme name.", .{});
-                return;
+                return 1;
             }
             from_name = args[i];
         } else {
             output.err("Unknown option '{s}'.", .{arg});
-            return;
+            return 1;
         }
     }
 
-    var handle = (try resolveOrReport(allocator, from_name)) orelse return;
+    var handle = (try resolveOrReport(allocator, from_name)) orelse return 1;
     defer handle.deinit();
 
     var seeded = handle.value();
@@ -331,16 +353,17 @@ fn runCreate(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const path = config.saveUserTheme(allocator, name, seeded, force) catch |err| switch (err) {
         error.ThemeAlreadyExists => {
             output.err("Theme '{s}' already exists. Use --force to overwrite.", .{name});
-            return;
+            return 1;
         },
         else => {
             output.err("Couldn't create theme '{s}': {s}", .{ name, @errorName(err) });
-            return;
+            return 1;
         },
     };
     defer allocator.free(path);
 
     output.ok("Created theme '{s}' at '{s}'.", .{ name, path });
+    return 0;
 }
 
 /// Points `$HOME` at a fresh temporary directory with the standard `~/.znip` tree.

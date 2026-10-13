@@ -1,5 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const mini_regex = @import("mini_regex.zig");
 const c = @cImport({
     @cInclude("tree_sitter/api.h");
     if (build_options.wasm_enabled) @cInclude("wasm.h");
@@ -24,7 +25,10 @@ extern fn tree_sitter_zig() *c.TSLanguage;
 
 const HighlightsQueryMap = struct {
     pub const c = @embedFile("../deps/tree-sitter-c/queries/highlights.scm");
-    pub const cpp = @embedFile("../deps/tree-sitter-cpp/queries/highlights.scm");
+    // Like upstream's own configuration (tree-sitter-cpp's `highlights` lists
+    // tree-sitter-c's query first), the C++ query only holds what C++ adds on
+    // top of C - on its own it highlights next to nothing.
+    pub const cpp = @embedFile("../deps/tree-sitter-c/queries/highlights.scm") ++ "\n" ++ @embedFile("../deps/tree-sitter-cpp/queries/highlights.scm");
     pub const css = @embedFile("../deps/tree-sitter-css/queries/highlights.scm");
     pub const go = @embedFile("../deps/tree-sitter-go/queries/highlights.scm");
     pub const html = @embedFile("../deps/tree-sitter-html/queries/highlights.scm");
@@ -134,21 +138,28 @@ pub const LanguageRef = union(enum) {
 // Intentionally has no deinit(): construct with an arena allocator (as
 // Parser.attachRegistry's caller does) and let the arena's teardown free the
 // name/query buffers and hashmap. The wasm_engine/wasm_store are never
-// explicitly deleted - a real crash was found inside this vendored
-// tree-sitter snapshot's own ts_wasm_store_delete cleanup, independent of how
-// the caller manages lifetimes (see the Phase 2 WASM spike test). Since znip
-// is a short-lived, one-shot CLI process, leaking these for process lifetime
-// is an acceptable stance; revisit if this is ever used in a long-lived process.
+// explicitly deleted - a crash was found inside this vendored tree-sitter
+// snapshot's own ts_wasm_store_delete cleanup (see the Phase 2 WASM spike
+// test). Since znip is a short-lived, one-shot CLI process, leaking these for
+// process lifetime is an acceptable stance; revisit if this is ever used in a
+// long-lived process.
+//
+// Note that ts_parser_set_wasm_store transfers ownership of the store to the
+// parser (ts_parser_delete frees it), so a parser borrowing this registry's
+// store must hand it back with ts_parser_take_wasm_store before it is deleted
+// (see Parser.sourceCodeMatches); otherwise the registry is left dangling.
 pub const LanguageRegistry = struct {
     allocator: std.mem.Allocator,
     wasm_engine: ?*c.TSWasmEngine = null,
     wasm_store: ?*c.TSWasmStore = null,
-    loaded: std.StringHashMap(DynamicLanguage),
+    // Entries are individually heap-allocated so the `*const DynamicLanguage`
+    // handed out by resolve() stays valid when the map rehashes on a later put.
+    loaded: std.StringHashMap(*DynamicLanguage),
 
     pub fn init(allocator: std.mem.Allocator) LanguageRegistry {
         return .{
             .allocator = allocator,
-            .loaded = std.StringHashMap(DynamicLanguage).init(allocator),
+            .loaded = std.StringHashMap(*DynamicLanguage).init(allocator),
         };
     }
 
@@ -167,7 +178,8 @@ pub const LanguageRegistry = struct {
         // runtime) in non-wasm builds, or the default build fails to link.
         if (comptime !build_options.wasm_enabled) return null;
 
-        if (self.loaded.getPtr(name)) |existing| return existing;
+        if (self.loaded.get(name)) |existing| return existing;
+        if (!@import("grammar_cache.zig").isValidGrammarName(name)) return null;
 
         const home = @import("config.zig").homeDir(self.allocator) catch return null;
         defer self.allocator.free(home);
@@ -214,22 +226,27 @@ pub const LanguageRegistry = struct {
 
         const store = try self.ensureWasmStore();
 
+        // tree-sitter reads the language name as a C string.
+        const dir_name_z = try self.allocator.dupeZ(u8, dir_name);
+        defer self.allocator.free(dir_name_z);
+
         var wasm_err: c.TSWasmError = undefined;
-        const ts_language = c.ts_wasm_store_load_language(store, dir_name.ptr, wasm_bytes.ptr, @intCast(wasm_bytes.len), &wasm_err) orelse {
+        const ts_language = c.ts_wasm_store_load_language(store, dir_name_z.ptr, wasm_bytes.ptr, @intCast(wasm_bytes.len), &wasm_err) orelse {
             std.log.err("ts_wasm_store_load_language failed for '{s}': kind={d} message={s}", .{ dir_name, wasm_err.kind, wasm_err.message });
-            self.allocator.free(query_source);
             return error.WasmLanguageLoadFailed;
         };
 
         const owned_register_key = try self.allocator.dupe(u8, register_as);
         const owned_display_name = try self.allocator.dupe(u8, dir_name);
-        try self.loaded.put(owned_register_key, .{
+        const entry = try self.allocator.create(DynamicLanguage);
+        entry.* = .{
             .name = owned_display_name,
             .ts_language = ts_language,
             .highlights_query = query_source,
-        });
+        };
+        try self.loaded.put(owned_register_key, entry);
 
-        return self.loaded.getPtr(owned_register_key);
+        return entry;
     }
 
     const CachedGrammarMeta = struct {
@@ -255,7 +272,7 @@ pub const LanguageRegistry = struct {
             const meta_bytes = std.fs.cwd().readFileAlloc(self.allocator, meta_path, 64 * 1024) catch continue;
             defer self.allocator.free(meta_bytes);
 
-            var parsed = std.json.parseFromSlice(CachedGrammarMeta, self.allocator, meta_bytes, .{ .allocate = .alloc_always }) catch continue;
+            var parsed = std.json.parseFromSlice(CachedGrammarMeta, self.allocator, meta_bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch continue;
             defer parsed.deinit();
 
             for (parsed.value.extensions) |ext| {
@@ -297,6 +314,152 @@ const TreeStats = struct {
     missing_nodes: u32 = 0,
     max_depth: u32 = 0,
     has_error: bool = false,
+};
+
+/// Evaluates the text predicates of a query pattern (`#eq?`, `#match?`,
+/// `#any-of?`, ... and their `not-`/`any-` variants). libtree-sitter only
+/// parses predicates; it leaves running them to the caller, and without that a
+/// pattern like `((identifier) @constant (#match? @constant "^[A-Z]"))` would
+/// capture every identifier.
+///
+/// Predicates that aren't text filters (`#set!`, `#is-not?`, ...), unknown
+/// ones, and `#match?` patterns outside mini_regex's supported subset are
+/// treated as satisfied, i.e. they don't filter anything.
+const PredicateEvaluator = struct {
+    arena: std.heap.ArenaAllocator,
+    regexes: std.StringHashMapUnmanaged(?mini_regex.Regex) = .empty,
+    lua_patterns: std.StringHashMapUnmanaged(?mini_regex.Regex) = .empty,
+
+    const Op = enum { eq, match, lua_match, any_of };
+    const ParsedName = struct { op: Op, negate: bool, any: bool };
+
+    fn init(allocator: std.mem.Allocator) PredicateEvaluator {
+        return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    }
+
+    fn deinit(self: *PredicateEvaluator) void {
+        self.arena.deinit();
+    }
+
+    fn parseName(name: []const u8) ?ParsedName {
+        var rest = name;
+        var negate = false;
+        var any = false;
+        while (true) {
+            if (std.mem.startsWith(u8, rest, "not-")) {
+                negate = true;
+                rest = rest["not-".len..];
+            } else if (std.mem.startsWith(u8, rest, "any-") and !std.mem.eql(u8, rest, "any-of?")) {
+                any = true;
+                rest = rest["any-".len..];
+            } else break;
+        }
+        const op: Op = if (std.mem.eql(u8, rest, "eq?"))
+            .eq
+        else if (std.mem.eql(u8, rest, "match?"))
+            .match
+        else if (std.mem.eql(u8, rest, "lua-match?"))
+            .lua_match
+        else if (std.mem.eql(u8, rest, "any-of?"))
+            .any_of
+        else
+            return null;
+        return .{ .op = op, .negate = negate, .any = any };
+    }
+
+    /// Whether every predicate attached to the pattern `match` came from holds.
+    fn matchPasses(self: *PredicateEvaluator, query: *const c.TSQuery, match: c.TSQueryMatch, source: []const u8) bool {
+        var step_count: u32 = 0;
+        const steps = c.ts_query_predicates_for_pattern(query, match.pattern_index, &step_count);
+        if (step_count == 0) return true;
+
+        // The steps are every predicate of the pattern back to back, each
+        // terminated by a `Done` step.
+        var i: usize = 0;
+        while (i < step_count) {
+            const start = i;
+            while (i < step_count and steps[i].type != c.TSQueryPredicateStepTypeDone) i += 1;
+            const predicate = steps[start..i];
+            i += 1;
+            if (predicate.len == 0) continue;
+            if (!self.predicatePasses(query, match, source, predicate)) return false;
+        }
+        return true;
+    }
+
+    fn predicatePasses(self: *PredicateEvaluator, query: *const c.TSQuery, match: c.TSQueryMatch, source: []const u8, predicate: []const c.TSQueryPredicateStep) bool {
+        if (predicate[0].type != c.TSQueryPredicateStepTypeString) return true;
+        const parsed = parseName(stringValue(query, predicate[0].value_id)) orelse return true;
+
+        const args = predicate[1..];
+        if (args.len < 2 or args[0].type != c.TSQueryPredicateStepTypeCapture) return true;
+
+        // A capture can hold several nodes (quantified captures): by default
+        // all of them must satisfy the predicate, with `any-` just one.
+        var seen = false;
+        var all_ok = true;
+        var any_ok = false;
+        for (match.captures[0..match.capture_count]) |capture| {
+            if (capture.index != args[0].value_id) continue;
+            const satisfied = self.textSatisfies(query, match, source, parsed.op, args[1..], nodeText(source, capture.node)) orelse continue;
+            seen = true;
+            if (satisfied != parsed.negate) any_ok = true else all_ok = false;
+        }
+        if (!seen) return true; // e.g. an optional capture that didn't match
+        return if (parsed.any) any_ok else all_ok;
+    }
+
+    /// null means "can't evaluate" (malformed predicate, unsupported regex).
+    fn textSatisfies(self: *PredicateEvaluator, query: *const c.TSQuery, match: c.TSQueryMatch, source: []const u8, op: Op, operands: []const c.TSQueryPredicateStep, text: []const u8) ?bool {
+        switch (op) {
+            .eq => {
+                const operand = operands[0];
+                if (operand.type == c.TSQueryPredicateStepTypeString) {
+                    return std.mem.eql(u8, text, stringValue(query, operand.value_id));
+                }
+                if (operand.type != c.TSQueryPredicateStepTypeCapture) return null;
+                for (match.captures[0..match.capture_count]) |other| {
+                    if (other.index == operand.value_id) return std.mem.eql(u8, text, nodeText(source, other.node));
+                }
+                return null;
+            },
+            .match, .lua_match => {
+                if (operands[0].type != c.TSQueryPredicateStepTypeString) return null;
+                const regex = self.regexFor(stringValue(query, operands[0].value_id), if (op == .match) .regex else .lua) orelse return null;
+                return regex.isMatch(text);
+            },
+            .any_of => {
+                for (operands) |operand| {
+                    if (operand.type != c.TSQueryPredicateStepTypeString) return null;
+                    if (std.mem.eql(u8, text, stringValue(query, operand.value_id))) return true;
+                }
+                return false;
+            },
+        }
+    }
+
+    /// Compiled (and cached) pattern, or null if it uses unsupported syntax.
+    fn regexFor(self: *PredicateEvaluator, pattern: []const u8, flavor: mini_regex.Flavor) ?mini_regex.Regex {
+        const arena = self.arena.allocator();
+        const cache = if (flavor == .regex) &self.regexes else &self.lua_patterns;
+        const entry = cache.getOrPut(arena, pattern) catch return null;
+        if (!entry.found_existing) {
+            entry.value_ptr.* = mini_regex.Regex.compile(arena, pattern, flavor) catch null;
+        }
+        return entry.value_ptr.*;
+    }
+
+    fn stringValue(query: *const c.TSQuery, id: u32) []const u8 {
+        var len: u32 = 0;
+        const ptr = c.ts_query_string_value_for_id(query, id, &len);
+        return ptr[0..len];
+    }
+
+    fn nodeText(source: []const u8, node: c.TSNode) []const u8 {
+        const end = @min(c.ts_node_end_byte(node), source.len);
+        const start = @min(c.ts_node_start_byte(node), end);
+        return source[start..end];
+    }
 };
 
 pub const Parser = struct {
@@ -346,6 +509,13 @@ pub const Parser = struct {
         if (detected_language == .dynamic) {
             c.ts_parser_set_wasm_store(parser, self.registry.?.wasm_store.?);
         }
+        // The parser owns the store it was given and would free it on delete,
+        // but the registry still references it (and every language loaded into
+        // it), so take it back first. Registered after the delete above so it
+        // runs before it.
+        defer if (detected_language == .dynamic) {
+            _ = c.ts_parser_take_wasm_store(parser);
+        };
         _ = c.ts_parser_set_language(parser, lang);
 
         const tree = c.ts_parser_parse_string(parser, null, self.source_code.ptr, @intCast(self.source_code.len)) orelse return error.ParseFailed;
@@ -366,6 +536,9 @@ pub const Parser = struct {
         const root_node = c.ts_tree_root_node(tree);
         c.ts_query_cursor_exec(cursor, query, root_node);
 
+        var predicates = PredicateEvaluator.init(self.allocator);
+        defer predicates.deinit();
+
         var matches = std.ArrayList(Match).empty;
         errdefer {
             for (matches.items) |m| {
@@ -375,6 +548,7 @@ pub const Parser = struct {
         }
         var match: c.TSQueryMatch = undefined;
         while (c.ts_query_cursor_next_match(cursor, &match)) {
+            if (!predicates.matchPasses(query, match, self.source_code)) continue;
             for (0..match.capture_count) |i| {
                 const capture = match.captures[i];
                 const node = capture.node;
@@ -499,9 +673,10 @@ pub const Parser = struct {
 
         if (eqExt(ext, ".zig")) return .zig;
         if (eqExt(ext, ".rs")) return .rust;
-        if (eqExt(ext, ".py")) return .python;
-        if (eqExt(ext, ".js") or eqExt(ext, ".mjs") or eqExt(ext, ".cjs")) return .javascript;
-        if (eqExt(ext, ".ts") or eqExt(ext, ".tsx")) return .typescript;
+        if (eqExt(ext, ".py") or eqExt(ext, ".pyi")) return .python;
+        // tree-sitter-javascript's grammar covers JSX.
+        if (eqExt(ext, ".js") or eqExt(ext, ".mjs") or eqExt(ext, ".cjs") or eqExt(ext, ".jsx")) return .javascript;
+        if (eqExt(ext, ".ts") or eqExt(ext, ".tsx") or eqExt(ext, ".mts") or eqExt(ext, ".cts")) return .typescript;
         if (eqExt(ext, ".c")) return .c;
         if (eqExt(ext, ".cpp") or eqExt(ext, ".cc") or eqExt(ext, ".cxx") or eqExt(ext, ".hpp") or eqExt(ext, ".hh") or eqExt(ext, ".hxx")) return .cpp;
         if (eqExt(ext, ".go")) return .go;
@@ -706,10 +881,9 @@ pub const Parser = struct {
 
         var tokens = std.ArrayList(Token).empty;
         errdefer {
-            for (tokens.items) |t| {
-                self.allocator.free(t.text);
-                self.allocator.free(t.capture_name);
-            }
+            // Only the text is ours: capture names are shared with `matches`
+            // (or are the literal "" for gaps), which own/outlive them.
+            for (tokens.items) |t| self.allocator.free(t.text);
             tokens.deinit(self.allocator);
         }
         var current_byte: usize = 0;
@@ -1038,11 +1212,15 @@ test "detectLanguageFromPath maps every supported extension" {
         .{ "a.zig", .zig },
         .{ "a.rs", .rust },
         .{ "a.py", .python },
+        .{ "a.pyi", .python },
         .{ "a.js", .javascript },
+        .{ "a.jsx", .javascript },
         .{ "a.mjs", .javascript },
         .{ "a.cjs", .javascript },
         .{ "a.ts", .typescript },
         .{ "a.tsx", .typescript },
+        .{ "a.mts", .typescript },
+        .{ "a.cts", .typescript },
         .{ "a.c", .c },
         .{ "a.cpp", .cpp },
         .{ "a.cc", .cpp },
@@ -1533,7 +1711,7 @@ const language_samples = [_]LanguageSample{
     .{
         .lang = "cpp",
         .source = "#include <iostream>\nint main() {\n    std::cout << 1;\n}\n",
-        .expect = &.{},
+        .expect = &.{ .{ "int", .type }, .{ "main", .function }, .{ "1", .number } },
     },
     .{
         .lang = "java",
@@ -1596,6 +1774,7 @@ test "every native grammar loads, parses and highlights its sample" {
         var parser = Parser.init(allocator, sample.source, null);
         parser.setRequestedLanguage(sample.lang);
         const matches = try parser.sourceCodeMatches();
+        if (matches.items.len == 0) std.debug.print("{s}: no highlight matches at all\n", .{sample.lang});
         try std.testing.expect(matches.items.len > 0);
 
         const tokens = try parser.sourceCodeTokens(matches);
@@ -1962,11 +2141,13 @@ test "resolve returns an already-loaded language without touching the disk" {
     defer @import("config.zig").home_dir_override = null;
 
     var registry = LanguageRegistry.init(arena.allocator());
-    try registry.loaded.put("json-alias", .{
+    const preloaded = try arena.allocator().create(DynamicLanguage);
+    preloaded.* = .{
         .name = "json",
         .ts_language = tree_sitter_json(),
         .highlights_query = HighlightsQueryMap.json,
-    });
+    };
+    try registry.loaded.put("json-alias", preloaded);
 
     if (comptime !build_options.wasm_enabled) {
         // Without wasm support the registry never resolves anything.
@@ -1977,7 +2158,7 @@ test "resolve returns an already-loaded language without touching the disk" {
     const found = (try registry.resolve("json-alias")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("json", found.name);
     try std.testing.expect(found.ts_language == tree_sitter_json());
-    try std.testing.expectEqual(registry.loaded.getPtr("json-alias").?, found);
+    try std.testing.expectEqual(registry.loaded.get("json-alias").?, found);
 }
 
 test "a Parser with a registry still uses native grammars for known languages" {
@@ -2028,4 +2209,83 @@ test "an unrecognized extension with a registry falls back to content scoring wh
     parser.attachRegistry(&registry);
 
     try expectNative(.python, try parser.detectLanguage());
+}
+
+/// Whether the query reported `capture` for exactly the text `text`.
+fn hasCapture(allocator: std.mem.Allocator, lang: []const u8, source: [:0]const u8, text: []const u8, capture: []const u8) !bool {
+    var parser = Parser.init(allocator, source, null);
+    parser.setRequestedLanguage(lang);
+    const matches = try parser.sourceCodeMatches();
+    for (matches.items) |m| {
+        if (std.mem.eql(u8, m.capture_name, capture) and std.mem.eql(u8, source[m.start_byte..m.end_byte], text)) return true;
+    }
+    return false;
+}
+
+test "#match? predicates filter captures: only SCREAMING_CASE identifiers are constants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The Python query has `((identifier) @constant (#match? @constant "^[A-Z][A-Z_0-9]+$"))`
+    // and `((identifier) @constructor (#match? @constructor "^[A-Z]"))`. Without
+    // predicate evaluation every identifier would get both captures.
+    const src = "MAX_SIZE = 1\nvalue = MAX_SIZE\nPoint = 2\n";
+    try std.testing.expect(try hasCapture(a, "python", src, "MAX_SIZE", "constant"));
+    try std.testing.expect(try hasCapture(a, "python", src, "MAX_SIZE", "constructor"));
+    try std.testing.expect(!try hasCapture(a, "python", src, "value", "constant"));
+    try std.testing.expect(!try hasCapture(a, "python", src, "value", "constructor"));
+    // Capitalised but not SCREAMING_CASE: a constructor, not a constant.
+    try std.testing.expect(try hasCapture(a, "python", src, "Point", "constructor"));
+    try std.testing.expect(!try hasCapture(a, "python", src, "Point", "constant"));
+}
+
+test "#lua-match? predicates are evaluated (Zig types start with a capital)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // `((identifier) @type (#lua-match? @type "^[A-Z_][a-zA-Z0-9_]*"))` in the Zig query.
+    const src = "const Point = struct {};\nvar point: u8 = 0;\n";
+    try std.testing.expect(try hasCapture(a, "zig", src, "Point", "type"));
+    try std.testing.expect(!try hasCapture(a, "zig", src, "point", "type"));
+}
+
+test "#eq? predicates are evaluated" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // `((identifier) @variable.builtin (#eq? @variable.builtin "_"))` in the Zig query.
+    const src = "const x = 1;\nconst _ = x;\n";
+    try std.testing.expect(try hasCapture(a, "zig", src, "_", "variable.builtin"));
+    try std.testing.expect(!try hasCapture(a, "zig", src, "x", "variable.builtin"));
+}
+
+test "#any-of? predicates are evaluated" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // `(builtin_identifier) @keyword.import (#any-of? @keyword.import "@import" "@cImport")`
+    const src = "const std = @import(\"std\");\nconst n = @intCast(1);\n";
+    try std.testing.expect(try hasCapture(a, "zig", src, "@import", "keyword.import"));
+    try std.testing.expect(!try hasCapture(a, "zig", src, "@intCast", "keyword.import"));
+}
+
+test "PredicateEvaluator.parseName understands the not-/any- variants" {
+    const E = PredicateEvaluator;
+    const eq = E.parseName("eq?").?;
+    try std.testing.expect(eq.op == .eq and !eq.negate and !eq.any);
+    const not_eq = E.parseName("not-eq?").?;
+    try std.testing.expect(not_eq.op == .eq and not_eq.negate and !not_eq.any);
+    const any_not_match = E.parseName("any-not-match?").?;
+    try std.testing.expect(any_not_match.op == .match and any_not_match.negate and any_not_match.any);
+    const any_of = E.parseName("any-of?").?;
+    try std.testing.expect(any_of.op == .any_of and !any_of.negate and !any_of.any);
+    const not_any_of = E.parseName("not-any-of?").?;
+    try std.testing.expect(not_any_of.op == .any_of and not_any_of.negate);
+    try std.testing.expect(E.parseName("lua-match?").?.op == .lua_match);
+    try std.testing.expect(E.parseName("set!") == null);
+    try std.testing.expect(E.parseName("is-not?") == null);
 }

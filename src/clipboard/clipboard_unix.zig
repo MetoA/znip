@@ -10,9 +10,12 @@ const wlcopy: []const u8 = "wl-copy";
 const xsel_read = [_][]const u8{ xsel, "--output", "--clipboard" };
 const xclip_read = [_][]const u8{ xclip, "-out", "-selection", "clipboard" };
 const wlpaste_read = [_][]const u8{ wlpaste, "--no-newline" };
-const xsel_write_image = [_][]const u8{ xsel, "--input", "--clipboard", "--attachment", "image/png" };
+// xsel only handles text selections, so it can't be used to copy an image.
 const xclip_write_image = [_][]const u8{ xclip, "-in", "-selection", "clipboard", "-t", "image/png" };
 const wlcopy_write_image = [_][]const u8{ wlcopy, "--type", "image/png" };
+
+/// Same limit as for files and stdin.
+const max_clipboard_bytes = 10 * 1024 * 1024;
 
 const Operation = enum {
     read,
@@ -42,47 +45,71 @@ fn findProgramByNamePosix(name: []const u8, path: ?[]const u8, buf: []u8) ?[]con
     return null;
 }
 
+fn isInstalled(name: []const u8, path_env: ?[]const u8) bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    return findProgramByNamePosix(name, path_env, &buf) != null;
+}
+
+/// Picks the clipboard tool: the Wayland ones when running under Wayland
+/// (`WAYLAND_DISPLAY` is the reliable signal; `XDG_SESSION_TYPE` is `tty`
+/// when a compositor was started from a console), otherwise xclip, otherwise
+/// xsel for reading. Only tools that are actually installed are chosen.
 fn getCmd(operation: Operation) ![]const []const u8 {
-    const pathenv = std.process.getEnvVarOwned(std.heap.page_allocator, "PATH") catch "";
-    const wd = std.process.getEnvVarOwned(std.heap.page_allocator, "XDG_SESSION_TYPE") catch "";
-    if (std.mem.eql(u8, wd, "wayland")) {
-        return if (operation == Operation.read) &wlpaste_read else &wlcopy_write_image;
+    const path_env: ?[]const u8 = std.posix.getenv("PATH");
+    const session_type: []const u8 = std.posix.getenv("XDG_SESSION_TYPE") orelse "";
+    const wayland = std.posix.getenv("WAYLAND_DISPLAY") != null or std.mem.eql(u8, session_type, "wayland");
+
+    if (wayland) {
+        switch (operation) {
+            .read => if (isInstalled(wlpaste, path_env)) return &wlpaste_read,
+            .write_image => if (isInstalled(wlcopy, path_env)) return &wlcopy_write_image,
+        }
     }
-    var buf: [255]u8 = undefined;
-    var program = findProgramByNamePosix(xclip, pathenv, &buf);
-    if (program != null) {
-        return if (operation == Operation.read) &xclip_read else &xclip_write_image;
+
+    if (isInstalled(xclip, path_env)) {
+        return if (operation == .read) &xclip_read else &xclip_write_image;
     }
-    program = findProgramByNamePosix(xsel, pathenv, &buf);
-    if (program != null) {
-        return if (operation == Operation.read) &xsel_read else &xsel_write_image;
-    }
+    if (operation == .read and isInstalled(xsel, path_env)) return &xsel_read;
+
     return error.ClipboardCmdNotFound;
 }
 
-pub fn read() ![]u8 {
-    const cmd = try getCmd(.read);
+/// Runs `argv` and returns its stdout (caller frees). A non-zero exit - e.g.
+/// `xclip`/`wl-paste` when the clipboard holds no text - is an error rather
+/// than an empty string.
+pub fn runReadCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
     const result = try std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
-        .argv = cmd,
+        .allocator = allocator,
+        .argv = argv,
+        .max_output_bytes = max_clipboard_bytes,
     });
+    defer allocator.free(result.stderr);
+    errdefer allocator.free(result.stdout);
+
+    if (result.term != .Exited or result.term.Exited != 0) return error.ClipboardEmpty;
     return result.stdout;
 }
 
-pub fn write(png_bytes: []const u8) !void {
+pub fn read(allocator: std.mem.Allocator) ![]u8 {
+    const cmd = try getCmd(.read);
+    return runReadCommand(allocator, cmd);
+}
+
+pub fn write(allocator: std.mem.Allocator, png_bytes: []const u8) !void {
     const cmd = try getCmd(.write_image);
-    var proc = std.process.Child.init(
-        cmd,
-        std.heap.page_allocator,
-    );
+    var proc = std.process.Child.init(cmd, allocator);
     proc.stdin_behavior = .Pipe;
     proc.stdout_behavior = .Ignore;
     proc.stderr_behavior = .Ignore;
 
     try proc.spawn();
-    try proc.stdin.?.writeAll(png_bytes);
+
+    // The child may exit early (no DISPLAY, bad option): that shows up as a
+    // broken pipe here. Either way the pipe is closed and the child reaped.
+    const write_result = proc.stdin.?.writeAll(png_bytes);
     proc.stdin.?.close();
     proc.stdin = null;
     const term = proc.wait() catch return error.ClipboardProcessFailed;
+    write_result catch return error.ClipboardProcessFailed;
     if (term != .Exited or term.Exited != 0) return error.ClipboardProcessFailed;
 }

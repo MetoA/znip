@@ -16,18 +16,24 @@ pub const FontEntry = struct {
     source: FontSource,
 };
 
-const font_extensions = [_][]const u8{ ".ttf", ".otf" };
+/// `.ttc`/`.otc` collections are included (their first face is used, which is
+/// what the renderer asks Blend2D for): macOS ships several of its monospace
+/// fonts, e.g. Menlo, that way.
+const font_extensions = [_][]const u8{ ".ttf", ".otf", ".ttc", ".otc" };
+
+/// Fonts bigger than this are ignored (CJK families can be tens of MB).
+const max_font_file_bytes = 64 * 1024 * 1024;
 
 fn hasFontExtension(name: []const u8) bool {
     for (font_extensions) |ext| {
-        if (std.mem.endsWith(u8, name, ext)) return true;
+        if (std.ascii.endsWithIgnoreCase(name, ext)) return true;
     }
     return false;
 }
 
 fn stripFontExtension(name: []const u8) []const u8 {
     for (font_extensions) |ext| {
-        if (std.mem.endsWith(u8, name, ext)) return name[0 .. name.len - ext.len];
+        if (std.ascii.endsWithIgnoreCase(name, ext)) return name[0 .. name.len - ext.len];
     }
     return name;
 }
@@ -59,18 +65,42 @@ fn systemFontDirPaths(allocator: std.mem.Allocator) ![]const []const u8 {
             } else |_| {}
         },
         .linux, .freebsd, .openbsd, .netbsd, .dragonfly => {
-            try dirs.append(allocator, try allocator.dupe(u8, "/usr/share/fonts"));
-            try dirs.append(allocator, try allocator.dupe(u8, "/usr/local/share/fonts"));
+            try appendUniqueDir(allocator, &dirs, try allocator.dupe(u8, "/usr/share/fonts"));
+            try appendUniqueDir(allocator, &dirs, try allocator.dupe(u8, "/usr/local/share/fonts"));
+            // XDG base directories: distributions like NixOS or Guix keep
+            // fonts outside the fixed locations above.
+            const xdg_data_dirs: []const u8 = std.posix.getenv("XDG_DATA_DIRS") orelse "";
+            var xdg_it = std.mem.tokenizeScalar(u8, xdg_data_dirs, ':');
+            while (xdg_it.next()) |data_dir| {
+                if (!std.fs.path.isAbsolute(data_dir)) continue;
+                try appendUniqueDir(allocator, &dirs, try std.fs.path.join(allocator, &[_][]const u8{ data_dir, "fonts" }));
+            }
             if (config.homeDir(allocator)) |home| {
                 defer allocator.free(home);
-                try dirs.append(allocator, try std.fs.path.join(allocator, &[_][]const u8{ home, ".local", "share", "fonts" }));
-                try dirs.append(allocator, try std.fs.path.join(allocator, &[_][]const u8{ home, ".fonts" }));
+                const data_home: ?[]const u8 = std.posix.getenv("XDG_DATA_HOME");
+                if (data_home != null and std.fs.path.isAbsolute(data_home.?)) {
+                    try appendUniqueDir(allocator, &dirs, try std.fs.path.join(allocator, &[_][]const u8{ data_home.?, "fonts" }));
+                }
+                try appendUniqueDir(allocator, &dirs, try std.fs.path.join(allocator, &[_][]const u8{ home, ".local", "share", "fonts" }));
+                try appendUniqueDir(allocator, &dirs, try std.fs.path.join(allocator, &[_][]const u8{ home, ".fonts" }));
             } else |_| {}
         },
         else => {},
     }
 
     return dirs.toOwnedSlice(allocator);
+}
+
+/// Appends `path` (taking ownership) unless an equal one is already listed.
+fn appendUniqueDir(allocator: std.mem.Allocator, dirs: *std.ArrayList([]const u8), path: []const u8) !void {
+    for (dirs.items) |existing| {
+        if (std.mem.eql(u8, existing, path)) {
+            allocator.free(path);
+            return;
+        }
+    }
+    errdefer allocator.free(path);
+    try dirs.append(allocator, path);
 }
 
 /// A directory to scan for font files, tagged with the priority source it
@@ -98,7 +128,10 @@ fn allFontDirs(allocator: std.mem.Allocator) ![]FontDir {
         defer pc_mut.deinit();
         if (pc_mut.value.font_directories) |extra_dirs| {
             for (extra_dirs) |extra_dir| {
-                try dirs.append(allocator, .{ .path = try allocator.dupe(u8, extra_dir), .source = .extra, .owned = true });
+                // `~/fonts` is as valid here as an absolute path.
+                const expanded = config.expandTilde(allocator, extra_dir) catch continue;
+                errdefer allocator.free(expanded);
+                try dirs.append(allocator, .{ .path = expanded, .source = .extra, .owned = true });
             }
         }
     }
@@ -129,7 +162,7 @@ fn freeRawFontFile(allocator: std.mem.Allocator, f: RawFontFile) void {
 /// `/usr/share/fonts/truetype/dejavu/...`).
 fn collectFontFiles(allocator: std.mem.Allocator, dir_path: []const u8) ![]RawFontFile {
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return &[_]RawFontFile{},
+        error.FileNotFound, error.NotDir, error.AccessDenied => return &[_]RawFontFile{},
         else => return err,
     };
     defer dir.close();
@@ -143,8 +176,26 @@ fn collectFontFiles(allocator: std.mem.Allocator, dir_path: []const u8) ![]RawFo
         files.deinit(allocator);
     }
 
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
+    while (true) {
+        // One unreadable subdirectory (permissions, a dangling mount) must
+        // not hide every other font; the walker has already moved past it, so
+        // continuing is safe.
+        const entry = (walker.next() catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        }) orelse break;
+
+        const is_file = switch (entry.kind) {
+            .file => true,
+            // Font packages and managers (Homebrew casks, Nix, stow) install
+            // symlinks; follow them to see what they point at.
+            .sym_link, .unknown => blk: {
+                const stat = entry.dir.statFile(entry.basename) catch break :blk false;
+                break :blk stat.kind == .file;
+            },
+            else => false,
+        };
+        if (!is_file) continue;
         if (!hasFontExtension(entry.basename)) continue;
 
         const stem = stripFontExtension(entry.basename);
@@ -248,6 +299,7 @@ fn appendFontEntries(
     source: FontSource,
     entries: *std.ArrayList(FontEntry),
     seen_names: *std.StringHashMap(void),
+    validate: bool,
 ) !void {
     const files = try collectFontFiles(allocator, dir_path);
     defer allocator.free(files);
@@ -280,8 +332,10 @@ fn appendFontEntries(
             continue;
         }
 
-        const renderable = blk: {
-            const font_bytes = std.fs.cwd().readFileAlloc(allocator, f.abs_path, 10 * 1024 * 1024) catch break :blk false;
+        // Validating means reading and parsing the whole file, so a plain
+        // name lookup skips it and checks only the font it ends up using.
+        const renderable = !validate or blk: {
+            const font_bytes = std.fs.cwd().readFileAlloc(allocator, f.abs_path, max_font_file_bytes) catch break :blk false;
             defer allocator.free(font_bytes);
             break :blk isFontRenderable(font_bytes);
         };
@@ -329,7 +383,7 @@ fn listFontsInDirs(allocator: std.mem.Allocator, dirs: []const FontDir) ![]FontE
     try seen_names.put(bundled_name, {});
 
     for (dirs) |dir| {
-        try appendFontEntries(allocator, dir.path, dir.source, &entries, &seen_names);
+        try appendFontEntries(allocator, dir.path, dir.source, &entries, &seen_names, true);
     }
 
     return entries.toOwnedSlice(allocator);
@@ -363,23 +417,65 @@ pub fn listAvailableFontNames(allocator: std.mem.Allocator) ![]const []const u8 
 
 /// Resolves `name` against every font source (bundled, user, extra
 /// directories, system) in priority order and returns the font file bytes.
-/// Falls back to the embedded default if `name` can't be found anywhere.
+/// Falls back to the embedded default (with a warning) if `name` can't be
+/// found anywhere or isn't usable.
 pub fn loadFontBytes(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
     if (std.mem.eql(u8, name, default_font_name)) {
         return allocator.dupe(u8, embedded_fonts.font_jet_brains_mono_bold);
     }
 
-    const entries = try listAvailableFonts(allocator);
-    defer freeFontEntries(allocator, entries);
+    const dirs = try allFontDirs(allocator);
+    defer {
+        for (dirs) |d| if (d.owned) allocator.free(d.path);
+        allocator.free(dirs);
+    }
 
-    return fontBytesFromEntries(allocator, entries, name);
+    const bytes = try loadFontBytesFromDirs(allocator, dirs, name);
+    if (bytes) |b| return b;
+
+    std.log.warn("Font '{s}' wasn't found (or can't render code); using {s}.", .{ name, default_font_name });
+    return allocator.dupe(u8, embedded_fonts.font_jet_brains_mono_bold);
+}
+
+/// Finds `name` by file name alone, stopping at the first directory that has it
+/// (so the rest of the system's fonts are never touched), and validates only
+/// that one font. Returns null if it's missing or not renderable.
+fn loadFontBytesFromDirs(allocator: std.mem.Allocator, dirs: []const FontDir, name: []const u8) !?[]const u8 {
+    var entries = std.ArrayList(FontEntry).empty;
+    defer freeEntries(allocator, &entries);
+    var seen_names = std.StringHashMap(void).init(allocator);
+    defer seen_names.deinit();
+
+    for (dirs) |dir| {
+        try appendFontEntries(allocator, dir.path, dir.source, &entries, &seen_names, false);
+
+        const entry = findEntryByName(entries.items, name) orelse continue;
+        const bytes = std.fs.cwd().readFileAlloc(allocator, entry.path.?, max_font_file_bytes) catch return null;
+        if (!isFontRenderable(bytes)) {
+            allocator.free(bytes);
+            return null;
+        }
+        return bytes;
+    }
+    return null;
+}
+
+/// Exact name match first, then ignoring case (`--font "jetbrains mono"`).
+fn findEntryByName(entries: []const FontEntry, name: []const u8) ?FontEntry {
+    for (entries) |e| {
+        if (e.path != null and std.mem.eql(u8, e.name, name)) return e;
+    }
+    for (entries) |e| {
+        if (e.path != null and std.ascii.eqlIgnoreCase(e.name, name)) return e;
+    }
+    return null;
 }
 
 fn fontBytesFromEntries(allocator: std.mem.Allocator, entries: []const FontEntry, name: []const u8) ![]const u8 {
     for (entries) |e| {
         if (!std.mem.eql(u8, e.name, name)) continue;
         const path = e.path orelse return allocator.dupe(u8, embedded_fonts.font_jet_brains_mono_bold);
-        return std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch allocator.dupe(u8, embedded_fonts.font_jet_brains_mono_bold);
+        return std.fs.cwd().readFileAlloc(allocator, path, max_font_file_bytes) catch allocator.dupe(u8, embedded_fonts.font_jet_brains_mono_bold);
     }
 
     return allocator.dupe(u8, embedded_fonts.font_jet_brains_mono_bold);
@@ -389,12 +485,18 @@ test "stripFontExtension strips known extensions only" {
     try std.testing.expectEqualStrings("Inter-Bold", stripFontExtension("Inter-Bold.ttf"));
     try std.testing.expectEqualStrings("Inter-Bold", stripFontExtension("Inter-Bold.otf"));
     try std.testing.expectEqualStrings("Inter-Bold", stripFontExtension("Inter-Bold"));
+    try std.testing.expectEqualStrings("Inter-Bold", stripFontExtension("Inter-Bold.TTF"));
+    try std.testing.expectEqualStrings("Menlo", stripFontExtension("Menlo.ttc"));
 }
 
-test "hasFontExtension recognizes ttf and otf only" {
+test "hasFontExtension recognizes font files regardless of case" {
     try std.testing.expect(hasFontExtension("a.ttf"));
     try std.testing.expect(hasFontExtension("a.otf"));
+    try std.testing.expect(hasFontExtension("a.TTF"));
+    try std.testing.expect(hasFontExtension("Menlo.ttc"));
+    try std.testing.expect(hasFontExtension("A.OTC"));
     try std.testing.expect(!hasFontExtension("a.txt"));
+    try std.testing.expect(!hasFontExtension("a.ttf.bak"));
 }
 
 fn freeEntries(allocator: std.mem.Allocator, entries: *std.ArrayList(FontEntry)) void {
@@ -423,7 +525,7 @@ test "appendFontEntries disambiguates same-stem files with their parent director
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
 
-    try appendFontEntries(allocator, dir_path, .user, &entries, &seen);
+    try appendFontEntries(allocator, dir_path, .user, &entries, &seen, true);
 
     try std.testing.expectEqual(@as(usize, 2), entries.items.len);
     var found_fam1 = false;
@@ -455,7 +557,7 @@ test "appendFontEntries does not re-add a name already claimed by a higher-prior
     defer allocator.free(shadow_name);
     try seen.put(shadow_name, {});
 
-    try appendFontEntries(allocator, dir_path, .system, &entries, &seen);
+    try appendFontEntries(allocator, dir_path, .system, &entries, &seen, true);
 
     try std.testing.expectEqual(@as(usize, 0), entries.items.len);
 }
@@ -665,7 +767,7 @@ test "appendFontEntries rejects files that are not renderable fonts" {
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
 
-    try appendFontEntries(allocator, dir, .user, &entries, &seen);
+    try appendFontEntries(allocator, dir, .user, &entries, &seen, true);
 
     try std.testing.expectEqual(@as(usize, 1), entries.items.len);
     try std.testing.expectEqualStrings("Real", entries.items[0].name);
@@ -694,7 +796,7 @@ test "appendFontEntries handles several fonts that share a stem in one scan" {
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
 
-    try appendFontEntries(allocator, dir, .system, &entries, &seen);
+    try appendFontEntries(allocator, dir, .system, &entries, &seen, true);
 
     try std.testing.expectEqual(@as(usize, 3), entries.items.len);
     for ([_][]const u8{ "a/Regular", "b/Regular", "c/Regular" }) |name| {
@@ -831,4 +933,162 @@ test "fontBytesFromEntries matches names exactly" {
     const bytes = try fontBytesFromEntries(allocator, &entries, "custom");
     defer allocator.free(bytes);
     try std.testing.expectEqualSlices(u8, bundled_font_bytes, bytes);
+}
+
+fn hasName(entries: []const FontEntry, name: []const u8) bool {
+    for (entries) |e| if (std.mem.eql(u8, e.name, name)) return true;
+    return false;
+}
+
+test "appendFontEntries finds upper-case and collection extensions" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "Win.TTF", .data = embedded_fonts.font_jet_brains_mono_bold });
+    try tmp.dir.writeFile(.{ .sub_path = "Coll.ttc", .data = embedded_fonts.font_jet_brains_mono_bold });
+    try tmp.dir.writeFile(.{ .sub_path = "notes.txt", .data = "not a font" });
+
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    var entries = std.ArrayList(FontEntry).empty;
+    defer freeEntries(allocator, &entries);
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    try appendFontEntries(allocator, dir_path, .user, &entries, &seen, true);
+    try std.testing.expect(hasName(entries.items, "Win"));
+    try std.testing.expect(hasName(entries.items, "Coll"));
+    try std.testing.expectEqual(@as(usize, 2), entries.items.len);
+}
+
+test "appendFontEntries follows symlinked font files" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("store");
+    try tmp.dir.writeFile(.{ .sub_path = "store/Real.ttf", .data = embedded_fonts.font_jet_brains_mono_bold });
+    try tmp.dir.makePath("fonts");
+    const target = try tmp.dir.realpathAlloc(allocator, "store/Real.ttf");
+    defer allocator.free(target);
+    try tmp.dir.symLink(target, "fonts/Linked.ttf", .{});
+    // A dangling link must be skipped quietly, not abort the scan.
+    try tmp.dir.symLink("/definitely/not/here.ttf", "fonts/Dangling.ttf", .{});
+
+    const dir_path = try tmp.dir.realpathAlloc(allocator, "fonts");
+    defer allocator.free(dir_path);
+    var entries = std.ArrayList(FontEntry).empty;
+    defer freeEntries(allocator, &entries);
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    try appendFontEntries(allocator, dir_path, .user, &entries, &seen, true);
+    try std.testing.expect(hasName(entries.items, "Linked"));
+    try std.testing.expect(!hasName(entries.items, "Dangling"));
+}
+
+test "appendFontEntries survives an unreadable subdirectory" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("locked");
+    try tmp.dir.makePath("open");
+    try tmp.dir.writeFile(.{ .sub_path = "open/Good.ttf", .data = embedded_fonts.font_jet_brains_mono_bold });
+    try tmp.dir.writeFile(.{ .sub_path = "locked/Hidden.ttf", .data = embedded_fonts.font_jet_brains_mono_bold });
+
+    var locked = try tmp.dir.openDir("locked", .{});
+    try locked.chmod(0o000);
+    defer {
+        locked.chmod(0o755) catch {};
+        locked.close();
+    }
+    // Running as root ignores permissions; then there's nothing to test.
+    if (tmp.dir.openDir("locked", .{ .iterate = true })) |opened| {
+        var d = opened;
+        d.close();
+        return error.SkipZigTest;
+    } else |_| {}
+
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    var entries = std.ArrayList(FontEntry).empty;
+    defer freeEntries(allocator, &entries);
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    try appendFontEntries(allocator, dir_path, .user, &entries, &seen, true);
+    try std.testing.expect(hasName(entries.items, "Good"));
+}
+
+test "collectFontFiles treats a directory it can't open as empty" {
+    const allocator = std.testing.allocator;
+    const files = try collectFontFiles(allocator, "/definitely/not/a/dir");
+    try std.testing.expectEqual(@as(usize, 0), files.len);
+}
+
+test "loadFontBytesFromDirs resolves by name, case-insensitively, validating only the match" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "MyMono-Regular.ttf", .data = embedded_fonts.font_jet_brains_mono_bold });
+    // Garbage that would fail validation if it were ever looked at.
+    try tmp.dir.writeFile(.{ .sub_path = "Broken.ttf", .data = "not a font at all" });
+
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const dirs = [_]FontDir{.{ .path = dir_path, .source = .user, .owned = false }};
+
+    const exact = (try loadFontBytesFromDirs(allocator, &dirs, "MyMono-Regular")) orelse return error.TestUnexpectedResult;
+    defer allocator.free(exact);
+    try std.testing.expectEqualSlices(u8, embedded_fonts.font_jet_brains_mono_bold, exact);
+
+    const folded = (try loadFontBytesFromDirs(allocator, &dirs, "mymono-regular")) orelse return error.TestUnexpectedResult;
+    defer allocator.free(folded);
+
+    // Unknown, and present-but-unusable, both come back as null (the caller falls back).
+    try std.testing.expect((try loadFontBytesFromDirs(allocator, &dirs, "Nope")) == null);
+    try std.testing.expect((try loadFontBytesFromDirs(allocator, &dirs, "Broken")) == null);
+}
+
+test "loadFontBytes falls back to the bundled font for an unknown name" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    config.home_dir_override = home;
+    defer config.home_dir_override = null;
+
+    const bytes = try loadFontBytes(allocator, "Definitely Not Installed 12345");
+    defer allocator.free(bytes);
+    try std.testing.expectEqualSlices(u8, embedded_fonts.font_jet_brains_mono_bold, bytes);
+}
+
+test "font_directories from config.json may start with ~" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    config.home_dir_override = home;
+    defer config.home_dir_override = null;
+
+    try tmp.dir.makePath(".znip");
+    try tmp.dir.writeFile(.{ .sub_path = ".znip/config.json", .data = "{\"active_preset\":\"default\",\"font_directories\":[\"~/myfonts\"]}" });
+
+    const dirs = try allFontDirs(allocator);
+    defer {
+        for (dirs) |d| if (d.owned) allocator.free(d.path);
+        allocator.free(dirs);
+    }
+    const expected = try std.fs.path.join(allocator, &.{ home, "myfonts" });
+    defer allocator.free(expected);
+    var found = false;
+    for (dirs) |d| {
+        if (d.source == .extra and std.mem.eql(u8, d.path, expected)) found = true;
+    }
+    try std.testing.expect(found);
 }

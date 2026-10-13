@@ -5,10 +5,61 @@ const theme = @import("../ui/theme.zig");
 /// (config, presets, themes, fonts, grammars). Always null in production.
 pub var home_dir_override: ?[]const u8 = null;
 
-/// The user's home directory; caller frees.
+/// The user's home directory; caller frees. Must be an absolute path: an
+/// empty or relative `$HOME` would make everything under `~/.znip` resolve
+/// against the working directory (and trips asserts in std's absolute-path
+/// helpers).
 pub fn homeDir(allocator: std.mem.Allocator) ![]u8 {
     if (home_dir_override) |home| return allocator.dupe(u8, home);
-    return std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    errdefer allocator.free(home);
+    if (!std.fs.path.isAbsolute(home)) return error.InvalidHome;
+    return home;
+}
+
+/// Expands a leading `~` / `~/` to the home directory; any other path is
+/// returned unchanged (as a copy). Caller frees.
+pub fn expandTilde(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (std.mem.eql(u8, path, "~") or std.mem.startsWith(u8, path, "~/")) {
+        const home = try homeDir(allocator);
+        defer allocator.free(home);
+
+        if (path.len == 1) return try allocator.dupe(u8, home);
+        return try std.fs.path.join(allocator, &[_][]const u8{ home, path[2..] });
+    }
+    return try allocator.dupe(u8, path);
+}
+
+/// Preset and theme names become file names under `~/.znip`, so they must not
+/// be able to point anywhere else.
+pub fn isValidName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    return std.mem.indexOfAny(u8, name, "/\\\x00") == null;
+}
+
+const json_parse_options: std.json.ParseOptions = .{
+    .allocate = .alloc_always,
+    // Files are hand-edited and may come from a newer znip: tolerate keys we
+    // don't know about instead of refusing to run.
+    .ignore_unknown_fields = true,
+};
+
+/// Writes `data` to `path` through a uniquely named sibling file and a rename,
+/// so a crash or full disk can't leave a truncated file behind.
+fn writeFileReplacing(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.{x}.tmp", .{ path, std.crypto.random.int(u64) });
+    defer allocator.free(tmp_path);
+
+    const cwd = std.fs.cwd();
+    {
+        const file = try cwd.createFile(tmp_path, .{ .exclusive = true });
+        errdefer cwd.deleteFile(tmp_path) catch {};
+        defer file.close();
+        try file.writeAll(data);
+    }
+    errdefer cwd.deleteFile(tmp_path) catch {};
+    try cwd.rename(tmp_path, path);
 }
 
 pub const Preset = struct {
@@ -22,6 +73,16 @@ pub const Preset = struct {
     horizontal_padding_px: u32,
     include_drop_shadow: bool,
     transparent_background: bool = false,
+
+    pub const max_font_size = 512;
+    pub const max_padding_px = 10_000;
+
+    /// Rejects values that can't produce a sensible image (and would
+    /// overflow the renderer's size arithmetic).
+    pub fn validate(self: Preset) !void {
+        if (self.font_size == 0 or self.font_size > max_font_size) return error.InvalidFontSize;
+        if (self.vertical_padding_px > max_padding_px or self.horizontal_padding_px > max_padding_px) return error.InvalidPadding;
+    }
 };
 
 pub const Config = struct {
@@ -35,13 +96,16 @@ pub const Config = struct {
 
         const data = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
             error.FileNotFound => {
-                return try std.json.parseFromSlice(Config, allocator, config_default, .{ .allocate = .alloc_always});
+                return try std.json.parseFromSlice(Config, allocator, config_default, json_parse_options);
             },
             else => return err,
         };
         defer allocator.free(data);
 
-        return try std.json.parseFromSlice(Config, allocator, data, .{ .allocate = .alloc_always});
+        return std.json.parseFromSlice(Config, allocator, data, json_parse_options) catch |err| {
+            std.log.warn("Couldn't parse '{s}'", .{path});
+            return err;
+        };
     }
 
     pub fn save(allocator: std.mem.Allocator, cfg: Config) !void {
@@ -51,17 +115,28 @@ pub const Config = struct {
         const json_data = try std.json.Stringify.valueAlloc(allocator, cfg, .{ .whitespace = .indent_2 });
         defer allocator.free(json_data);
 
-        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = json_data });
+        try writeFileReplacing(allocator, path, json_data);
+    }
+
+    /// Whether `~/.znip/presets/<name>.json` exists (a missing preset falls
+    /// back to the default one in `loadPreset`, which callers may want to
+    /// mention).
+    pub fn presetFileExists(allocator: std.mem.Allocator, name: []const u8) bool {
+        const path = presetPath(allocator, name) catch return false;
+        defer allocator.free(path);
+        std.fs.cwd().access(path, .{}) catch return false;
+        return true;
     }
 
     pub fn loadPreset(allocator: std.mem.Allocator, name: []const u8) !std.json.Parsed(Preset) {
+        if (!isValidName(name)) return error.InvalidPresetName;
         return readPresetFile(allocator, name) catch |err| switch (err) {
             error.FileNotFound => {
                 if (std.mem.eql(u8, name, "default")) {
-                    return try std.json.parseFromSlice(Preset, allocator, preset_default, .{ .allocate = .alloc_always });
+                    return try std.json.parseFromSlice(Preset, allocator, preset_default, json_parse_options);
                 }
                 return readPresetFile(allocator, "default") catch |err2| switch (err2) {
-                    error.FileNotFound => try std.json.parseFromSlice(Preset, allocator, preset_default, .{ .allocate = .alloc_always }),
+                    error.FileNotFound => try std.json.parseFromSlice(Preset, allocator, preset_default, json_parse_options),
                     else => err2,
                 };
             },
@@ -71,14 +146,22 @@ pub const Config = struct {
 
     pub fn savePreset(allocator: std.mem.Allocator, preset: Preset) !void {
         const name = preset.name orelse return error.PresetNameRequired;
+        try savePresetAs(allocator, name, preset);
+    }
 
-        const path_with_ext = try presetPath(allocator, name);
+    /// Saves `preset` as `~/.znip/presets/<file_stem>.json`. Unlike
+    /// `savePreset` this doesn't trust the preset's own `name` field to match
+    /// the file it was loaded from.
+    pub fn savePresetAs(allocator: std.mem.Allocator, file_stem: []const u8, preset: Preset) !void {
+        if (!isValidName(file_stem)) return error.InvalidPresetName;
+
+        const path_with_ext = try presetPath(allocator, file_stem);
         defer allocator.free(path_with_ext);
 
         const json_data = try std.json.Stringify.valueAlloc(allocator, preset, .{ .whitespace = .indent_2 });
         defer allocator.free(json_data);
 
-        try std.fs.cwd().writeFile(.{ .sub_path = path_with_ext, .data = json_data });
+        try writeFileReplacing(allocator, path_with_ext, json_data);
     }
 };
 
@@ -106,7 +189,10 @@ fn readPresetFile(allocator: std.mem.Allocator, name: []const u8) !std.json.Pars
     const data = try std.fs.cwd().readFileAlloc(allocator, path_with_ext, 1024 * 1024);
     defer allocator.free(data);
 
-    return try std.json.parseFromSlice(Preset, allocator, data, .{ .allocate = .alloc_always });
+    return std.json.parseFromSlice(Preset, allocator, data, json_parse_options) catch |err| {
+        std.log.warn("Couldn't parse '{s}'", .{path_with_ext});
+        return err;
+    };
 }
 
 pub fn userThemesDirPath(allocator: std.mem.Allocator) ![]const u8 {
@@ -117,6 +203,7 @@ pub fn userThemesDirPath(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn userThemePath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    if (!isValidName(name)) return error.InvalidThemeName;
     const dir = try userThemesDirPath(allocator);
     defer allocator.free(dir);
 
@@ -133,7 +220,10 @@ fn readUserThemeFile(allocator: std.mem.Allocator, name: []const u8) !std.json.P
     const data = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
     defer allocator.free(data);
 
-    return try std.json.parseFromSlice(theme.Theme, allocator, data, .{ .allocate = .alloc_always });
+    return std.json.parseFromSlice(theme.Theme, allocator, data, json_parse_options) catch |err| {
+        std.log.warn("Couldn't parse '{s}'", .{path});
+        return err;
+    };
 }
 
 /// Writes `t` to `~/.znip/themes/<name>.json`. Refuses to overwrite an
@@ -146,13 +236,18 @@ pub fn saveUserTheme(allocator: std.mem.Allocator, name: []const u8, t: theme.Th
     const json_data = try std.json.Stringify.valueAlloc(allocator, t, .{ .whitespace = .indent_2 });
     defer allocator.free(json_data);
 
-    const file = std.fs.createFileAbsolute(path, .{ .exclusive = !force }) catch |err| {
-        if (err == error.PathAlreadyExists) return error.ThemeAlreadyExists;
-        return err;
-    };
-    defer file.close();
-
-    try file.writeAll(json_data);
+    if (!force) {
+        // Exclusive create keeps "refuse to overwrite" race-free.
+        const file = std.fs.createFileAbsolute(path, .{ .exclusive = true }) catch |err| {
+            if (err == error.PathAlreadyExists) return error.ThemeAlreadyExists;
+            return err;
+        };
+        defer file.close();
+        errdefer std.fs.deleteFileAbsolute(path) catch {};
+        try file.writeAll(json_data);
+    } else {
+        try writeFileReplacing(allocator, path, json_data);
+    }
 
     return path;
 }
@@ -178,7 +273,8 @@ pub fn listUserThemeNames(allocator: std.mem.Allocator) ![]const []const u8 {
 
     var it = dir.iterate();
     while (try it.next()) |entry| {
-        if (entry.kind != .file) continue;
+        // Symlinks count: dotfile managers install themes that way.
+        if (entry.kind != .file and entry.kind != .sym_link and entry.kind != .unknown) continue;
         if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
         try names.append(allocator, try allocator.dupe(u8, entry.name[0 .. entry.name.len - 5]));
     }
@@ -193,7 +289,8 @@ pub fn resolveTheme(allocator: std.mem.Allocator, name: []const u8) !theme.Theme
     if (readUserThemeFile(allocator, name)) |parsed| {
         return .{ .owned = parsed };
     } else |err| switch (err) {
-        error.FileNotFound => {},
+        // A name that can't be a file name can still match a builtin.
+        error.FileNotFound, error.InvalidThemeName => {},
         else => return err,
     }
 
@@ -244,6 +341,9 @@ fn createRootFile(allocator: std.mem.Allocator, path: []const u8, contents: []co
     };
     defer file.close();
 
+    // Don't leave an empty file behind: later runs would see it as existing
+    // (and never repair it) and then fail to parse it.
+    errdefer std.fs.deleteFileAbsolute(full_path) catch {};
     try file.writeAll(contents);
 }
 
@@ -362,7 +462,7 @@ test "config_default parses with no optional settings" {
 
 test "preset_default parses to the documented defaults" {
     const allocator = std.testing.allocator;
-    const parsed = try std.json.parseFromSlice(Preset, allocator, preset_default, .{ .allocate = .alloc_always });
+    const parsed = try std.json.parseFromSlice(Preset, allocator, preset_default, json_parse_options);
     defer parsed.deinit();
     const p = parsed.value;
 
@@ -380,7 +480,7 @@ test "preset_default parses to the documented defaults" {
 
 test "the default preset names a builtin theme" {
     const allocator = std.testing.allocator;
-    const parsed = try std.json.parseFromSlice(Preset, allocator, preset_default, .{ .allocate = .alloc_always });
+    const parsed = try std.json.parseFromSlice(Preset, allocator, preset_default, json_parse_options);
     defer parsed.deinit();
     try std.testing.expect(theme.findBuiltin(parsed.value.theme) != null);
 }
@@ -710,4 +810,101 @@ test "resolveTheme surfaces a malformed user theme instead of hiding it" {
 
     try home.tmp.dir.writeFile(.{ .sub_path = ".znip/themes/Incomplete.json", .data = "{\"name\":\"x\",\"ui\":{},\"syntax\":{}}" });
     try std.testing.expectError(error.MissingField, resolveTheme(allocator, "Incomplete"));
+}
+
+test "isValidName rejects names that could leave ~/.znip" {
+    try std.testing.expect(isValidName("work"));
+    try std.testing.expect(isValidName("One Darker"));
+    try std.testing.expect(!isValidName(""));
+    try std.testing.expect(!isValidName("."));
+    try std.testing.expect(!isValidName(".."));
+    try std.testing.expect(!isValidName("../x"));
+    try std.testing.expect(!isValidName("a/b"));
+    try std.testing.expect(!isValidName("a\\b"));
+}
+
+test "Config.loadPreset and savePresetAs reject path-like names" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidPresetName, Config.loadPreset(allocator, "../../x"));
+    try std.testing.expectError(error.InvalidPresetName, Config.loadPreset(allocator, ""));
+    const preset = (try std.json.parseFromSlice(Preset, allocator, preset_default, json_parse_options));
+    defer preset.deinit();
+    try std.testing.expectError(error.InvalidPresetName, Config.savePresetAs(allocator, "a/b", preset.value));
+}
+
+test "config, preset and theme files tolerate unknown keys" {
+    const allocator = std.testing.allocator;
+    const home = try TmpHome.initWithConfigDirs(allocator);
+    defer home.deinit(allocator);
+
+    try home.tmp.dir.writeFile(.{
+        .sub_path = ".znip/config.json",
+        .data = "{\"$schema\": \"x\", \"active_preset\": \"default\", \"future\": [1, 2]}",
+    });
+    const cfg = try Config.load(allocator);
+    defer cfg.deinit();
+    try std.testing.expectEqualStrings("default", cfg.value.active_preset);
+
+    var extra = std.ArrayList(u8).empty;
+    defer extra.deinit(allocator);
+    try extra.appendSlice(allocator, "{\"comment\": \"hi\", ");
+    try extra.appendSlice(allocator, preset_default[1..]);
+    try home.tmp.dir.writeFile(.{ .sub_path = ".znip/presets/extra.json", .data = extra.items });
+    const preset = try Config.loadPreset(allocator, "extra");
+    defer preset.deinit();
+    try std.testing.expectEqual(@as(u32, 16), preset.value.font_size);
+}
+
+test "savePresetAs writes the file it is told to, regardless of the preset's name" {
+    const allocator = std.testing.allocator;
+    const home = try TmpHome.initWithConfigDirs(allocator);
+    defer home.deinit(allocator);
+
+    var parsed = try std.json.parseFromSlice(Preset, allocator, preset_default, json_parse_options);
+    defer parsed.deinit();
+    parsed.value.font_size = 20;
+
+    try Config.savePresetAs(allocator, "work", parsed.value);
+    const work = try Config.loadPreset(allocator, "work");
+    defer work.deinit();
+    try std.testing.expectEqual(@as(u32, 20), work.value.font_size);
+    // default.json is untouched.
+    const default = try Config.loadPreset(allocator, "default");
+    defer default.deinit();
+    try std.testing.expectEqual(@as(u32, 16), default.value.font_size);
+    // and no temp files are left in the presets directory
+    var dir = try home.tmp.dir.openDir(".znip/presets", .{ .iterate = true });
+    defer dir.close();
+    var it = dir.iterate();
+    while (try it.next()) |entry| try std.testing.expect(std.mem.endsWith(u8, entry.name, ".json"));
+}
+
+test "Preset.validate bounds font size and padding" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(Preset, allocator, preset_default, json_parse_options);
+    defer parsed.deinit();
+    var p = parsed.value;
+    try p.validate();
+    p.font_size = 0;
+    try std.testing.expectError(error.InvalidFontSize, p.validate());
+    p.font_size = Preset.max_font_size + 1;
+    try std.testing.expectError(error.InvalidFontSize, p.validate());
+    p.font_size = 16;
+    p.horizontal_padding_px = Preset.max_padding_px + 1;
+    try std.testing.expectError(error.InvalidPadding, p.validate());
+}
+
+test "listUserThemeNames includes symlinked theme files" {
+    const allocator = std.testing.allocator;
+    const home = try TmpHome.initWithConfigDirs(allocator);
+    defer home.deinit(allocator);
+
+    try home.tmp.dir.writeFile(.{ .sub_path = "real.json", .data = "{}" });
+    const target = try std.fs.path.join(allocator, &.{ home.path, "real.json" });
+    defer allocator.free(target);
+    try home.tmp.dir.symLink(target, ".znip/themes/linked.json", .{});
+
+    const names = try listUserThemeNames(allocator);
+    defer freeNames(allocator, names);
+    try expectContainsName(names, "linked");
 }

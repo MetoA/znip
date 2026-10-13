@@ -6,6 +6,9 @@ pub const SplitInclusiveIterator = struct {
     index: ?usize,
 
     pub fn next(self: *SplitInclusiveIterator) ?[]const u8 {
+        // An empty delimiter matches at `start` every time and would yield
+        // empty pieces forever.
+        std.debug.assert(self.delimiter.len > 0);
         const start = self.index orelse return null;
 
         if (std.mem.indexOfPos(u8, self.buffer, start, self.delimiter)) |delim_idx| {

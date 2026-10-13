@@ -1,8 +1,10 @@
 const std = @import("std");
 
 fn isWhitespaceOnly(line: []const u8) bool {
+    // A stray '\r' (CRLF input) must not make a blank line look like code,
+    // which would collapse the common margin to nothing.
     for (line) |byte| {
-        if (byte != ' ' and byte != '\t') return false;
+        if (byte != ' ' and byte != '\t' and byte != '\r' and byte != 0x0b and byte != 0x0c) return false;
     }
     return true;
 }
@@ -153,4 +155,12 @@ test "trimCommonIndent: result is NUL-terminated" {
     const result = try trimCommonIndent(allocator, input);
     defer allocator.free(result);
     try std.testing.expectEqual(@as(u8, 0), result[result.len]);
+}
+
+test "trimCommonIndent: blank CRLF lines don't defeat the margin" {
+    const allocator = std.testing.allocator;
+    const input: [:0]const u8 = "    a\r\n\r\n  \r\n    b\r";
+    const result = try trimCommonIndent(allocator, input);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("a\r\n\r\n\r\nb\r", result);
 }

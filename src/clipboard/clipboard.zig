@@ -3,20 +3,28 @@ const builtin = @import("builtin");
 const unix = @import("clipboard_unix.zig");
 const macos = @import("clipboard_macos.zig");
 
+/// Reads text from the system clipboard. Fails with `error.ClipboardEmpty`
+/// when it holds no text (rather than rendering a blank image).
 pub fn read(allocator: std.mem.Allocator) ![:0]u8 {
     const original = switch (builtin.os.tag) {
-        .macos => try macos.read(),
-        .linux, .freebsd, .openbsd, .netbsd, .dragonfly => try unix.read(),
+        .macos => try macos.read(allocator),
+        .linux, .freebsd, .openbsd, .netbsd, .dragonfly => try unix.read(allocator),
         else => @compileError("platform not supported"),
-    }; 
-    const null_terminated = try allocator.dupeZ(u8, original);
-    return null_terminated;
+    };
+    defer allocator.free(original);
+    if (std.mem.trim(u8, original, " \t\r\n").len == 0) return error.ClipboardEmpty;
+    return try allocator.dupeZ(u8, original);
 }
 
-pub fn write_image(image_bytes: []const u8) !void {
+/// Puts the PNG file at `png_path` on the system clipboard.
+pub fn write_image(allocator: std.mem.Allocator, png_path: []const u8) !void {
     switch (builtin.os.tag) {
-        .macos => try macos.write(image_bytes),
-        .linux, .freebsd, .openbsd, .netbsd, .dragonfly => try unix.write(image_bytes),
+        .macos => try macos.write(allocator, png_path),
+        .linux, .freebsd, .openbsd, .netbsd, .dragonfly => {
+            const png_bytes = try std.fs.cwd().readFileAlloc(allocator, png_path, 256 * 1024 * 1024);
+            defer allocator.free(png_bytes);
+            try unix.write(allocator, png_bytes);
+        },
         else => @compileError("platform not supported"),
     }
 }

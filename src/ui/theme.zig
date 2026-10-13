@@ -24,6 +24,10 @@ pub fn colorToHex(buf: []u8, c: Color) []const u8 {
 pub fn colorFromHex(s: []const u8) !Color {
     if (s.len == 0 or s[0] != '#') return error.InvalidCharacter;
     const digits = s[1..];
+    // parseUnsigned would also accept a leading '+' and '_' separators.
+    for (digits) |ch| {
+        if (!std.ascii.isHex(ch)) return error.InvalidCharacter;
+    }
 
     return switch (digits.len) {
         6 => blk: {
@@ -1187,4 +1191,13 @@ test "ThemeHandle.owned exposes the parsed theme and frees it on deinit" {
 
     try std.testing.expectEqualStrings("Minimal", handle.value().name);
     try std.testing.expectEqual(@as(Color, 0xFF303030), handle.value().ui.foreground);
+}
+
+test "colorFromHex rejects characters parseUnsigned would let through" {
+    try std.testing.expectError(error.InvalidCharacter, colorFromHex("#+12345"));
+    try std.testing.expectError(error.InvalidCharacter, colorFromHex("#12_345"));
+    try std.testing.expectError(error.InvalidCharacter, colorFromHex("#12345g"));
+    try std.testing.expectError(error.InvalidCharacter, colorFromHex("#-12345"));
+    try std.testing.expectEqual(@as(Color, 0xFF1A2B3C), try colorFromHex("#1a2b3c"));
+    try std.testing.expectEqual(@as(Color, 0x801A2B3C), try colorFromHex("#1A2B3C80"));
 }
