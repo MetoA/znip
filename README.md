@@ -300,5 +300,6 @@ Znip is built with [Zig](https://ziglang.org/), [Blend2D](https://blend2d.com/),
 
 ## License
 
-<!-- TODO: choose a license and add a LICENSE file -->
-To be decided.
+Znip is released under the [MIT License](LICENSE).
+
+The libraries it bundles keep their own licenses: Blend2D (zlib), Tree-sitter and its grammars (MIT), wasmtime (Apache-2.0 with LLVM exception) and JetBrains Mono (SIL OFL 1.1).
